@@ -21,3 +21,5 @@ test_single.py
 
 # macOS
 .DS_Store
+wbc_dump*
+*.html
