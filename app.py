@@ -632,48 +632,38 @@ HTML = """<!DOCTYPE html>
     width: 100%;
     max-width: 960px;
   }
-  .cmp-grid {
-    display: grid;
-    gap: 1px;
-    background: var(--border);
-    border: 1px solid var(--border);
+  /* COMPARE TABLE */
+  .cmp-table {
+    width: 100%;
+    border-collapse: collapse;
     margin-top: 20px;
-  }
-  .cmp-row {
-    display: grid;
-    background: var(--surface);
-    min-height: 40px;
-  }
-  .cmp-row.header-row { background: var(--bg); }
-  .cmp-cell {
-    padding: 10px 14px;
     font-size: 12px;
-    border-right: 1px solid var(--border);
-    display: flex;
-    align-items: center;
   }
-  .cmp-cell:last-child { border-right: none; }
-  .cmp-cell.row-label {
+  .cmp-table th, .cmp-table td {
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    vertical-align: middle;
+    text-align: left;
+  }
+  .cmp-table .row-label {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 10px;
     color: var(--muted);
     letter-spacing: 1px;
     text-transform: uppercase;
     background: var(--bg);
+    white-space: nowrap;
+    width: 130px;
   }
-  .cmp-cell.best {
-    color: var(--green);
-    font-weight: 700;
+  .cmp-table thead th {
+    background: var(--bg);
+    min-width: 200px;
+    vertical-align: top;
   }
-  .cmp-cell.worst { color: var(--red); }
-  .cmp-header-cell {
-    padding: 12px 14px;
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .cmp-header-cell:last-child { border-right: none; }
+  .cmp-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+  .cmp-table tbody tr:hover { background: rgba(212,168,67,0.04); }
+  .cmp-table td.best { color: var(--green); font-weight: 700; }
+  .cmp-table td.worst { color: var(--red); }
 
   /* MODAL */
   .modal-overlay {
@@ -2172,9 +2162,7 @@ function clearCompare() {
 function openCompare() {
   if (compareList.length < 2) return;
   const cars = compareList.map(id => allListings.find(x => x.id === id)).filter(Boolean);
-  const n = cars.length;
 
-  // Pre-compute deal scores
   const activePrices = allListings.filter(l => l.is_active && l.price).map(l => l.price);
   const marketAvg = activePrices.length ? activePrices.reduce((a,b)=>a+b,0)/activePrices.length : 0;
   cars.forEach(c => { c._cmpScore = getDealScore(c, marketAvg); });
@@ -2182,121 +2170,109 @@ function openCompare() {
   const content = document.getElementById('cmp-content');
   content.innerHTML = '';
 
-  // Grid column template: label col + N car cols
-  const colTemplate = `160px ${Array(n).fill('1fr').join(' ')}`;
+  const table = document.createElement('table');
+  table.className = 'cmp-table';
 
-  const grid = document.createElement('div');
-  grid.className = 'cmp-grid';
-  grid.style.gridTemplateColumns = '1px'; // handled per row
+  // ── thead: one <th> per car ──────────────────────────────────────────────
+  const thead = document.createElement('thead');
+  const headTr = document.createElement('tr');
+  // empty corner cell
+  const corner = document.createElement('th');
+  corner.className = 'row-label';
+  headTr.appendChild(corner);
 
-  // Helper to create a row
-  function makeRow(labelText, values, opts = {}) {
-    const row = document.createElement('div');
-    row.className = 'cmp-row';
-    row.style.gridTemplateColumns = colTemplate;
-
-    const label = document.createElement('div');
-    label.className = 'cmp-cell row-label';
-    label.textContent = labelText;
-    row.appendChild(label);
-
-    // Find best/worst for highlighting
-    const nums = values.map(v => typeof v === 'object' ? v._num : null);
-    const validNums = nums.filter(v => v !== null && !isNaN(v));
-    let bestNum = null, worstNum = null;
-    if (validNums.length > 1 && opts.highlight) {
-      bestNum = opts.highlight === 'low' ? Math.min(...validNums) : Math.max(...validNums);
-      worstNum = opts.highlight === 'low' ? Math.max(...validNums) : Math.min(...validNums);
-    }
-
-    values.forEach((v, i) => {
-      const cell = document.createElement('div');
-      cell.className = 'cmp-cell';
-      const num = typeof v === 'object' ? v._num : null;
-      const display = typeof v === 'object' ? v.text : v;
-      if (num !== null && bestNum !== null && num === bestNum) cell.classList.add('best');
-      else if (num !== null && worstNum !== null && num === worstNum) cell.classList.add('worst');
-      cell.textContent = display || '—';
-      row.appendChild(cell);
-    });
-    return row;
-  }
-
-  // ── Header row (images + titles) ────────────────────────────────────────
-  const headerRow = document.createElement('div');
-  headerRow.className = 'cmp-row header-row';
-  headerRow.style.gridTemplateColumns = colTemplate;
-  // Empty label cell
-  const emptyLabel = document.createElement('div');
-  emptyLabel.className = 'cmp-cell row-label';
-  headerRow.appendChild(emptyLabel);
   cars.forEach(c => {
-    const cell = document.createElement('div');
-    cell.className = 'cmp-header-cell';
+    const th = document.createElement('th');
     if (c.image) {
       const img = document.createElement('img');
       img.src = c.image;
-      img.style.cssText = 'width:100%;height:80px;object-fit:cover;border-radius:3px;border:1px solid var(--border)';
+      img.style.cssText = 'width:100%;height:80px;object-fit:cover;border-radius:3px;border:1px solid var(--border);display:block;margin-bottom:8px';
       img.onerror = function() { this.style.display='none'; };
-      cell.appendChild(img);
+      th.appendChild(img);
     }
     const titleEl = document.createElement('a');
     titleEl.href = c.url || '#';
     titleEl.target = '_blank';
-    titleEl.style.cssText = 'font-size:12px;font-weight:600;color:var(--text);text-decoration:none';
+    titleEl.style.cssText = 'font-size:12px;font-weight:600;color:var(--text);text-decoration:none;display:block;margin-bottom:4px';
     titleEl.textContent = (c.title || 'Unknown') + ' ↗';
-    cell.appendChild(titleEl);
+    th.appendChild(titleEl);
     const src = document.createElement('div');
     src.style.cssText = 'font-size:10px;color:var(--muted);font-family:monospace';
     src.textContent = c.source || 'AutoTrader';
-    cell.appendChild(src);
-    headerRow.appendChild(cell);
+    th.appendChild(src);
+    headTr.appendChild(th);
   });
-  grid.appendChild(headerRow);
+  thead.appendChild(headTr);
+  table.appendChild(thead);
 
-  // ── Data rows ────────────────────────────────────────────────────────────
-  const rows = [
-    ['ASKING PRICE',  cars.map(c => ({ _num: c.price, text: fmt(c.price) })), { highlight: 'low' }],
-    ['YEAR',          cars.map(c => ({ _num: parseInt(c.year), text: c.year || '—' })), { highlight: 'high' }],
-    ['MILEAGE',       cars.map(c => ({ _num: c.mileage, text: c.mileage ? Number(c.mileage).toLocaleString() + ' km' : '—' })), { highlight: 'low' }],
-    ['VARIANT',       cars.map(c => c.variant || '—'), {}],
-    ['LOCATION',      cars.map(c => c.location || '—'), {}],
-    ['DEALER',        cars.map(c => c.dealer || '—'), {}],
-    ['DEAL SCORE',    cars.map(c => ({ _num: c._cmpScore, text: c._cmpScore ? String(c._cmpScore) : '—' })), { highlight: 'high' }],
-    ['PRICE DROP',    cars.map(c => {
-      if (!c.prev_price || c.price >= c.prev_price) return { _num: 0, text: 'None' };
-      return { _num: c.prev_price - c.price, text: `▼ ${fmt(c.prev_price - c.price)}` };
-    }), { highlight: 'high' }],
-    ['DAYS LISTED',   cars.map(c => {
-      if (!c.first_seen) return '—';
-      const end = (c.is_active || !c.last_seen) ? new Date() : new Date(c.last_seen);
-      const d = Math.floor((end - new Date(c.first_seen)) / 86400000);
-      return { _num: d, text: d + 'd' };
-    }), {}],
-    ['EST. MONTHLY',  cars.map(c => {
-      if (!c.price) return '—';
-      const P = Math.max(0, c.price - 50000);
-      const r = 0.125 / 12;
-      const n = 60;
-      const m = P * r * Math.pow(1+r,n) / (Math.pow(1+r,n) - 1);
-      return { _num: Math.round(m), text: fmt(Math.round(m)) + '/mo' };
-    }), { highlight: 'low' }],
-    ['VS MARKET AVG', cars.map(c => {
-      if (!c.price || !marketAvg) return '—';
-      const diff = ((c.price - marketAvg) / marketAvg * 100).toFixed(1);
-      return { _num: parseFloat(diff), text: (diff > 0 ? '▲ +' : '▼ ') + diff + '%' };
-    }), { highlight: 'low' }],
-  ];
+  // ── tbody: one <tr> per metric ───────────────────────────────────────────
+  const tbody = document.createElement('tbody');
 
-  rows.forEach(([label, values, opts]) => {
-    grid.appendChild(makeRow(label, values, opts));
-  });
+  function addRow(label, values, highlight) {
+    // values: array of { _num, text } or plain strings
+    const nums = values.map(v => (v && typeof v === 'object') ? v._num : null);
+    const validNums = nums.filter(n => n !== null && !isNaN(n));
+    let bestNum = null, worstNum = null;
+    if (validNums.length > 1 && highlight) {
+      bestNum  = highlight === 'low' ? Math.min(...validNums) : Math.max(...validNums);
+      worstNum = highlight === 'low' ? Math.max(...validNums) : Math.min(...validNums);
+    }
 
-  content.appendChild(grid);
+    const tr = document.createElement('tr');
+    const labelTd = document.createElement('td');
+    labelTd.className = 'row-label';
+    labelTd.textContent = label;
+    tr.appendChild(labelTd);
+
+    values.forEach(v => {
+      const td = document.createElement('td');
+      const num  = (v && typeof v === 'object') ? v._num  : null;
+      const text = (v && typeof v === 'object') ? v.text  : (v || '—');
+      if (num !== null && bestNum  !== null && num === bestNum)  td.classList.add('best');
+      if (num !== null && worstNum !== null && num === worstNum) td.classList.add('worst');
+      td.textContent = text || '—';
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+
+  addRow('ASKING PRICE',  cars.map(c => ({ _num: c.price, text: fmt(c.price) })), 'low');
+  addRow('YEAR',          cars.map(c => ({ _num: parseInt(c.year), text: c.year || '—' })), 'high');
+  addRow('MILEAGE',       cars.map(c => ({ _num: c.mileage, text: c.mileage ? Number(c.mileage).toLocaleString() + ' km' : '—' })), 'low');
+  addRow('VARIANT',       cars.map(c => c.variant || '—'), null);
+  addRow('LOCATION',      cars.map(c => c.location || '—'), null);
+  addRow('DEALER',        cars.map(c => c.dealer || '—'), null);
+  addRow('DEAL SCORE',    cars.map(c => ({ _num: c._cmpScore, text: c._cmpScore ? String(c._cmpScore) : '—' })), 'high');
+  addRow('PRICE DROP',    cars.map(c => {
+    if (!c.prev_price || c.price >= c.prev_price) return { _num: 0, text: 'None' };
+    return { _num: c.prev_price - c.price, text: '▼ ' + fmt(c.prev_price - c.price) };
+  }), 'high');
+  addRow('DAYS LISTED',   cars.map(c => {
+    if (!c.first_seen) return '—';
+    const end = (c.is_active || !c.last_seen) ? new Date() : new Date(c.last_seen);
+    const d = Math.floor((end - new Date(c.first_seen)) / 86400000);
+    return { _num: d, text: d + 'd' };
+  }), null);
+  addRow('EST. MONTHLY',  cars.map(c => {
+    if (!c.price) return '—';
+    const P = Math.max(0, c.price - 50000);
+    const r = 0.125 / 12;
+    const n = 60;
+    const m = P * r * Math.pow(1+r,n) / (Math.pow(1+r,n) - 1);
+    return { _num: Math.round(m), text: fmt(Math.round(m)) + '/mo' };
+  }), 'low');
+  addRow('VS MARKET AVG', cars.map(c => {
+    if (!c.price || !marketAvg) return '—';
+    const diff = ((c.price - marketAvg) / marketAvg * 100).toFixed(1);
+    return { _num: parseFloat(diff), text: (parseFloat(diff) > 0 ? '▲ +' : '▼ ') + diff + '%' };
+  }), 'low');
+
+  table.appendChild(tbody);
+  content.appendChild(table);
 
   const note = document.createElement('div');
   note.style.cssText = 'font-size:11px;color:var(--dim);margin-top:12px';
-  note.textContent = 'Green = best value · Red = worst value · Est. Monthly assumes R50k deposit, 60 months at 12.5%';
+  note.textContent = 'Green = best value  ·  Red = worst value  ·  Est. Monthly assumes R50k deposit, 60 months at 12.5%';
   content.appendChild(note);
 
   document.getElementById('cmp-modal').classList.add('open');
