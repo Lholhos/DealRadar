@@ -730,8 +730,11 @@ HTML = """<!DOCTYPE html>
   <div class="stat" style="display:none"><div class="stat-label">Last Scraped</div><div class="stat-value" style="font-size:13px;color:var(--muted)" id="stat-last">Never</div></div>
 </div>
 
-<div id="market-insights" style="margin:0 auto 16px auto; max-width:1200px; padding:0 24px; font-size:12px; color:var(--muted); display:flex; justify-content:flex-end;">
-  <span id="mileage-sweet-spot" style="background:var(--card); padding:4px 10px; border-radius:4px; border:1px solid var(--border); display:none">
+<div id="market-insights" style="margin:0 auto 16px auto; max-width:1200px; padding:0 24px; font-size:12px; color:var(--muted); display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap;">
+  <span id="dup-insight" style="background:var(--surface); padding:4px 10px; border-radius:4px; border:1px solid var(--border); display:none; cursor:pointer" onclick="setStatus('duplicates');document.getElementById('filter-status').value='duplicates'">
+    <span style="color:var(--gold)">⚡</span> <span id="dup-insight-text"></span>
+  </span>
+  <span id="mileage-sweet-spot" style="background:var(--surface); padding:4px 10px; border-radius:4px; border:1px solid var(--border); display:none">
     <i class="icon" style="color:var(--gold)">⚡</i> <span id="mss-text"></span>
   </span>
 </div>
@@ -783,6 +786,7 @@ HTML = """<!DOCTYPE html>
         <option value="active">Active</option>
         <option value="gone">Gone (Sold)</option>
         <option value="watchlisted">Watchlisted ★</option>
+        <option value="duplicates">Duplicates ⚡</option>
         <option value="all">Any</option>
       </select>
     </div>
@@ -854,6 +858,13 @@ HTML = """<!DOCTYPE html>
       <div class="chart-card">
         <div class="chart-title">Listings by Year</div>
         <canvas id="chart-year" height="200"></canvas>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div class="chart-title" style="margin-bottom:0">Market Heat Map · Avg Price by Location</div>
+          <div id="heatmap-badge" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 10px;border-radius:3px;border:1px solid var(--border2);color:var(--green)"></div>
+        </div>
+        <canvas id="chart-heatmap" height="80"></canvas>
       </div>
     </div>
   </div>
@@ -1100,7 +1111,8 @@ async function loadListings() {
   // Pass include_inactive if Status is Any or Gone, or just always and handle locally. Let's always fetch all.
   const res = await fetch('/api/listings?include_inactive=1');
   allListings = await res.json();
-  
+  detectDuplicates();
+
   const locs = [...new Set(allListings.map(l => l.location).filter(Boolean))].sort();
   const locSelect = document.getElementById('filter-location');
   if (locSelect) {
@@ -1207,6 +1219,47 @@ function getDealScore(l, avgPrice) {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
+// ─── DUPLICATE DETECTOR ────────────────────────────────────────────────────
+function detectDuplicates() {
+  allListings.forEach(l => { delete l._dupGroupId; });
+
+  let nextGroupId = 1;
+  const urlToGroup = new Map();
+
+  for (let i = 0; i < allListings.length; i++) {
+    for (let j = i + 1; j < allListings.length; j++) {
+      const a = allListings[i], b = allListings[j];
+      if (!a.price || !b.price || !a.year || !b.year) continue;
+      if (a.source === b.source) continue;
+      if (a.year !== b.year) continue;
+      const priceDiff = Math.abs(a.price - b.price) / Math.max(a.price, b.price);
+      if (priceDiff > 0.05) continue; // within 5%
+
+      // Optional: mileage within 15% adds confidence but don't require it
+      const aGroup = urlToGroup.get(a.url);
+      const bGroup = urlToGroup.get(b.url);
+      const gid = aGroup || bGroup || nextGroupId++;
+      urlToGroup.set(a.url, gid);
+      urlToGroup.set(b.url, gid);
+    }
+  }
+
+  allListings.forEach(l => {
+    if (urlToGroup.has(l.url)) l._dupGroupId = urlToGroup.get(l.url);
+  });
+
+  const dupCount = new Set(urlToGroup.values()).size;
+  const insightEl = document.getElementById('dup-insight');
+  const insightText = document.getElementById('dup-insight-text');
+  if (dupCount > 0) {
+    const listingCount = urlToGroup.size;
+    insightEl.style.display = 'inline-block';
+    insightText.textContent = `${listingCount} listings are duplicates across sources (${dupCount} matches) — click to filter`;
+  } else {
+    insightEl.style.display = 'none';
+  }
+}
+
 function renderTable() {
   let activeData = allListings.filter(l => l.is_active === 1);
   const prices = activeData.map(l => l.price).filter(Boolean);
@@ -1216,6 +1269,7 @@ function renderTable() {
   if (filterStatus === 'active') data = data.filter(l => l.is_active === 1);
   if (filterStatus === 'gone') data = data.filter(l => l.is_active === 0);
   if (filterStatus === 'watchlisted') data = data.filter(l => l.watchlisted);
+  if (filterStatus === 'duplicates') data = data.filter(l => l._dupGroupId);
   
   if (filterYear !== 'all') data = data.filter(l => l.year === filterYear);
   if (filterLocation !== 'all') data = data.filter(l => l.location === filterLocation);
@@ -1369,6 +1423,13 @@ function renderTable() {
     spanSrc.style.cssText = 'background:var(--tertiary); color:var(--text); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap';
     spanSrc.textContent = l.source || 'AutoTrader';
     tdSrc.appendChild(spanSrc);
+    if (l._dupGroupId) {
+      const dupBadge = document.createElement('div');
+      dupBadge.title = `Likely same car on multiple platforms (group ${l._dupGroupId})`;
+      dupBadge.style.cssText = 'font-size:10px;color:var(--gold);margin-top:3px;font-family:monospace;cursor:default';
+      dupBadge.textContent = '⚡ dup #' + l._dupGroupId;
+      tdSrc.appendChild(dupBadge);
+    }
     tr.appendChild(tdSrc);
 
     // 4. Price
@@ -1667,6 +1728,67 @@ async function renderCharts() {
       plugins: { legend: { display: true, labels: { color: '#7d8590', font: { family: 'IBM Plex Mono', size: 11 } } } }
     }
   });
+
+  // ── Market Heat Map — avg price by location ───────────────────────────────
+  const locMap = {};
+  listings.filter(l => l.is_active && l.price && l.location).forEach(l => {
+    if (!locMap[l.location]) locMap[l.location] = { prices: [] };
+    locMap[l.location].prices.push(l.price);
+  });
+  const locStats = Object.entries(locMap)
+    .map(([name, d]) => ({
+      name,
+      count: d.prices.length,
+      avg: Math.round(d.prices.reduce((a,b) => a+b, 0) / d.prices.length),
+      min: Math.min(...d.prices),
+    }))
+    .sort((a, b) => a.avg - b.avg);
+
+  if (locStats.length > 0) {
+    const cheapestAvg = locStats[0].avg;
+    const hmBadge = document.getElementById('heatmap-badge');
+    hmBadge.style.display = 'inline-block';
+    hmBadge.textContent = 'Cheapest: ' + locStats[0].name + ' · R' + cheapestAvg.toLocaleString();
+
+    const hmColors = locStats.map(d =>
+      d.avg === cheapestAvg ? 'rgba(63,185,80,0.75)' : 'rgba(212,168,67,0.45)'
+    );
+    const hmBorders = locStats.map(d =>
+      d.avg === cheapestAvg ? '#3fb950' : '#d4a843'
+    );
+    if (charts.heatmap) charts.heatmap.destroy();
+    charts.heatmap = new Chart(document.getElementById('chart-heatmap'), {
+      type: 'bar',
+      data: {
+        labels: locStats.map(d => d.name),
+        datasets: [{
+          data: locStats.map(d => d.avg),
+          backgroundColor: hmColors,
+          borderColor: hmBorders,
+          borderWidth: 1,
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        ...chartDefaults,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const d = locStats[ctx.dataIndex];
+                return ` Avg R${d.avg.toLocaleString()}  ·  Lowest R${d.min.toLocaleString()}  ·  ${d.count} listing${d.count !== 1 ? 's' : ''}`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
+          y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 11 } } },
+        }
+      }
+    });
+  }
 }
 
 // ─── NEGOTIATION HELPER ─────────────────────────────────────────────────────
