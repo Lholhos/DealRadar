@@ -26,10 +26,11 @@ def parse_mileage(text: str) -> int | None:
     return int(digits) if digits else None
 
 
-def _parse_wbc(page, log) -> list[dict]:
-    log("Scraping WeBuyCars via JSON-LD...")
+def _parse_wbc(page, log, url: str = None) -> list[dict]:
+    target_url = url or WBC_URL
+    log(f"Scraping WeBuyCars: {target_url[:80]}...")
     try:
-        page.goto(WBC_URL, wait_until="domcontentloaded", timeout=60000)
+        page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
         # Wait a bit for JS to inject the JSON-LD payload into the head
         time.sleep(3)
         
@@ -111,7 +112,7 @@ def _parse_wbc(page, log) -> list[dict]:
         log(f"WBC Error: {e}")
         return []
 
-def scrape(max_pages: int = 5, headless: bool = True, status_callback=None) -> list[dict]:
+def scrape(max_pages: int = 5, headless: bool = True, status_callback=None, wbc_url: str = None) -> list[dict]:
     listings = []
 
     def log(msg):
@@ -360,7 +361,8 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None) -> l
                 break
 
         # 2) WeBuyCars
-        wbc_results = _parse_wbc(page, log)
+        effective_wbc_url = wbc_url or WBC_URL
+        wbc_results = _parse_wbc(page, log, url=effective_wbc_url)
         for w in wbc_results:
             if not any(l["url"] == w["url"] for l in listings):
                 listings.append(w)

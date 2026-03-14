@@ -74,6 +74,10 @@ def init_db():
             conn.execute("ALTER TABLE listings ADD COLUMN source TEXT DEFAULT 'AutoTrader';")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE listings ADD COLUMN watchlisted INTEGER DEFAULT 0;")
+        except sqlite3.OperationalError:
+            pass
 
 
 def upsert_listings(listings: list[dict]) -> dict:
@@ -157,6 +161,17 @@ def upsert_listings(listings: list[dict]) -> dict:
     return stats
 
 
+def toggle_watchlist(listing_id: int) -> bool:
+    """Toggle watchlisted status. Returns new state (True = watchlisted)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT watchlisted FROM listings WHERE id=?", (listing_id,)).fetchone()
+        if row is None:
+            return False
+        new_val = 0 if row[0] else 1
+        conn.execute("UPDATE listings SET watchlisted=? WHERE id=?", (new_val, listing_id))
+        return bool(new_val)
+
+
 def get_listings_with_latest_price(include_inactive: bool = False) -> list[dict]:
     """Returns listings with their latest price and price delta."""
     with get_conn() as conn:
@@ -166,7 +181,8 @@ def get_listings_with_latest_price(include_inactive: bool = False) -> list[dict]
                 l.id, l.url, l.title, l.variant, l.year, l.location, l.dealer, l.image, l.source,
                 l.first_seen, l.last_seen, l.is_active,
                 ph.price, ph.mileage, ph.mileage_raw, ph.price_raw, ph.scraped_at,
-                first_ph.price AS first_price
+                first_ph.price AS first_price,
+                l.watchlisted
             FROM listings l
             JOIN price_history ph ON ph.listing_id = l.id
                 AND ph.scraped_at = (
@@ -183,7 +199,7 @@ def get_listings_with_latest_price(include_inactive: bool = False) -> list[dict]
             "id": r[0], "url": r[1], "title": r[2], "variant": r[3], "year": r[4], "location": r[5], "dealer": r[6], "image": r[7], "source": r[8],
             "first_seen": r[9], "last_seen": r[10], "is_active": r[11],
             "price": r[12], "mileage": r[13], "mileage_raw": r[14], "price_raw": r[15], "scraped_at": r[16],
-            "prev_price": r[17]
+            "prev_price": r[17], "watchlisted": r[18]
         } for r in rows]
 
 
@@ -193,6 +209,21 @@ def get_price_history(listing_id: int) -> list[dict]:
             "SELECT price, mileage, scraped_at FROM price_history WHERE listing_id=? ORDER BY scraped_at ASC",
             (listing_id,),
         ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_day_of_week_prices() -> list[dict]:
+    """Avg price by day of week (0=Sun, 1=Mon, ..., 6=Sat) across all price history."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                CAST(strftime('%w', scraped_at) AS INTEGER) AS dow,
+                ROUND(AVG(price)) AS avg_price,
+                COUNT(*) AS count
+            FROM price_history
+            GROUP BY dow
+            ORDER BY dow ASC
+        """).fetchall()
         return [dict(r) for r in rows]
 
 

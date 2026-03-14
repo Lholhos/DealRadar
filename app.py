@@ -14,11 +14,13 @@ from database import (
     get_listings_with_latest_price,
     get_price_history,
     get_market_snapshots,
+    get_day_of_week_prices,
     get_recent_runs,
     start_run,
     finish_run,
     get_setting,
     set_setting,
+    toggle_watchlist,
 )
 
 app = Flask(__name__)
@@ -63,7 +65,8 @@ def _do_scrape():
         _scrape_status["log"].append(msg)
 
     try:
-        listings = scrape(max_pages=10, headless=True, status_callback=log)
+        wbc_url = get_setting("wbc_url", "") or None
+        listings = scrape(max_pages=10, headless=True, status_callback=log, wbc_url=wbc_url)
         stats = upsert_listings(listings)
         stats["total"] = len(listings)
         finish_run(run_id, stats)
@@ -154,8 +157,10 @@ def settings_api():
         data = request.json or {}
         if "price_alert" in data:
             set_setting("price_alert", str(data["price_alert"]))
+        if "wbc_url" in data:
+            set_setting("wbc_url", str(data["wbc_url"]))
         return jsonify({"ok": True})
-    return jsonify({"price_alert": get_setting("price_alert", "")})
+    return jsonify({"price_alert": get_setting("price_alert", ""), "wbc_url": get_setting("wbc_url", "")})
 
 
 @app.route("/api/listings/<int:listing_id>/history")
@@ -177,9 +182,51 @@ def market():
     return jsonify({"chart": snapshots, "velocity_30d": velocity})
 
 
+@app.route("/api/analytics")
+def analytics():
+    from datetime import datetime, timedelta
+    snapshots = get_market_snapshots()
+    dow_prices = get_day_of_week_prices()
+
+    # Linear regression on daily avg prices → 30-day forecast
+    forecast = []
+    slope = None
+    if len(snapshots) >= 3:
+        n = len(snapshots)
+        xs = list(range(n))
+        ys = [s["avg_price"] for s in snapshots]
+        sum_x = sum(xs)
+        sum_y = sum(ys)
+        sum_xy = sum(x * y for x, y in zip(xs, ys))
+        sum_xx = sum(x * x for x in xs)
+        denom = n * sum_xx - sum_x ** 2
+        if denom:
+            slope = (n * sum_xy - sum_x * sum_y) / denom
+            intercept = (sum_y - slope * sum_x) / n
+            last_date = datetime.fromisoformat(snapshots[-1]["date"])
+            for i in range(1, 31):
+                fx = n - 1 + i
+                forecast.append({
+                    "date": (last_date + timedelta(days=i)).strftime("%Y-%m-%d"),
+                    "projected_price": round(intercept + slope * fx),
+                })
+
+    return jsonify({
+        "forecast": forecast,
+        "dow": dow_prices,
+        "slope": round(slope, 2) if slope is not None else None,
+    })
+
+
 @app.route("/api/runs")
 def runs():
     return jsonify(get_recent_runs())
+
+
+@app.route("/api/listings/<int:listing_id>/watchlist", methods=["POST"])
+def toggle_watchlist_route(listing_id):
+    new_state = toggle_watchlist(listing_id)
+    return jsonify({"watchlisted": new_state})
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +255,20 @@ HTML = """<!DOCTYPE html>
     --text: #e6edf3;
     --muted: #7d8590;
     --dim: #3d444d;
+  }
+
+  [data-theme="light"] {
+    --bg: #f6f8fa;
+    --surface: #ffffff;
+    --border: #d0d7de;
+    --border2: #b0bac4;
+    --gold: #9a6f00;
+    --gold2: #c98a00;
+    --green: #1a7f37;
+    --red: #cf222e;
+    --text: #1f2328;
+    --muted: #57606a;
+    --dim: #8c959f;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -550,7 +611,7 @@ HTML = """<!DOCTYPE html>
   /* RUNS */
   .run-row {
     display: grid;
-    grid-template-columns: 1fr 80px 80px 80px 80px;
+    grid-template-columns: 1fr 80px 80px 80px 80px 80px;
     gap: 12px;
     padding: 10px 0;
     border-bottom: 1px solid var(--border);
@@ -581,6 +642,67 @@ HTML = """<!DOCTYPE html>
   .empty-state .sub { font-size: 12px; color: var(--muted); margin-top: 8px; }
   
   .age-old { font-weight: bold; color: var(--gold); }
+
+  /* STAR / WATCHLIST */
+  .star-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    color: var(--dim);
+    padding: 2px 4px;
+    line-height: 1;
+    transition: color 0.15s, transform 0.1s;
+  }
+  .star-btn:hover { color: var(--gold); transform: scale(1.2); }
+  .star-btn.starred { color: var(--gold); }
+
+  /* COMPACT MODE */
+  body.compact tbody td { padding: 5px 14px; }
+  body.compact .listing-thumb { display: none !important; }
+  body.compact .listing-meta { display: none; }
+  body.compact .scrape-log { max-height: 40px; }
+
+  /* THEME TOGGLE & COMPACT TOGGLE */
+  .icon-btn {
+    background: none;
+    border: 1px solid var(--border2);
+    color: var(--muted);
+    padding: 5px 10px;
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.15s;
+    line-height: 1;
+  }
+  .icon-btn:hover { border-color: var(--gold); color: var(--gold); }
+
+  /* SEARCH PROFILES */
+  .profiles-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .profiles-row select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border2);
+    padding: 3px 8px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    outline: none;
+  }
+  .profiles-row .prof-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
 </style>
 </head>
 <body>
@@ -590,8 +712,10 @@ HTML = """<!DOCTYPE html>
     <span class="wordmark">DEALRADAR</span>
     <span class="subtitle">Price Intelligence · 2022–2024</span>
   </div>
-  <div style="display:flex;gap:12px;align-items:center">
+  <div style="display:flex;gap:8px;align-items:center">
     <span id="velocity-badge" class="header-badge" style="display:none;font-weight:bold"></span>
+    <button class="icon-btn" id="compact-btn" onclick="toggleCompact()" title="Toggle compact view">⊟</button>
+    <button class="icon-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">☀</button>
   </div>
 </div>
 
@@ -622,9 +746,11 @@ HTML = """<!DOCTYPE html>
       <button class="scrape-btn" id="scrape-url-btn" onclick="triggerScrapeUrl()" style="background:var(--surface);border:1px solid var(--border);color:var(--text)">Add URL</button>
       
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-        <span style="font-size:12px;color:var(--muted)">Price Alert:</span>
+        <span style="font-size:12px;color:var(--muted)">WBC URL:</span>
+        <input type="text" id="wbc-url" placeholder="WeBuyCars search URL..." style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:220px;font-family:inherit;font-size:12px;outline:none">
+        <span style="font-size:12px;color:var(--muted)">Alert:</span>
         <input type="number" id="alert-price" placeholder="R320000" style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:90px;font-family:inherit;font-size:12px;outline:none">
-        <button onclick="saveAlert()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px">Save</button>
+        <button onclick="saveSettings()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px">Save</button>
       </div>
     </div>
     <div class="scrape-log" id="scrape-log">
@@ -656,13 +782,24 @@ HTML = """<!DOCTYPE html>
       <select id="filter-status" onchange="setStatus(this.value)" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px;outline:none">
         <option value="active">Active</option>
         <option value="gone">Gone (Sold)</option>
+        <option value="watchlisted">Watchlisted ★</option>
         <option value="all">Any</option>
       </select>
+    </div>
+    <!-- Search Profiles -->
+    <div class="profiles-row">
+      <span class="prof-label">Profiles:</span>
+      <select id="profiles-select" onchange="loadProfile(this.value)" style="min-width:160px">
+        <option value="">-- saved profiles --</option>
+      </select>
+      <button class="filter-btn" onclick="saveProfile()">+ Save Current</button>
+      <button class="filter-btn" onclick="deleteProfile()" style="color:var(--red);border-color:var(--red)">✕ Delete</button>
     </div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
+            <th style="width:28px">★</th>
             <th style="width:36px">#</th>
             <th class="sortable" onclick="setSort('title')">Listing <span class="sort-icon" id="sort-icon-title"></span></th>
             <th class="sortable" onclick="setSort('model')">Model <span class="sort-icon" id="sort-icon-model"></span></th>
@@ -679,7 +816,7 @@ HTML = """<!DOCTYPE html>
           </tr>
         </thead>
         <tbody id="listings-tbody">
-          <tr><td colspan="9" class="empty-state" style="padding:60px">
+          <tr><td colspan="14" class="empty-state" style="padding:60px">
             <div class="icon">🚗</div>
             <div class="msg">No data yet</div>
             <div class="sub">Run a scrape to fetch listings</div>
@@ -692,9 +829,19 @@ HTML = """<!DOCTYPE html>
   <!-- Charts Tab -->
   <div id="tab-charts" style="display:none">
     <div class="chart-grid">
+      <div class="chart-card" style="grid-column:1/-1">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div class="chart-title" style="margin-bottom:0">Market Average Price · Historical + 30-Day Forecast</div>
+          <div id="forecast-badge" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 10px;border-radius:3px;border:1px solid"></div>
+        </div>
+        <canvas id="chart-forecast" height="120"></canvas>
+      </div>
       <div class="chart-card">
-        <div class="chart-title">Market Average Price · Over Time</div>
-        <canvas id="chart-market" height="200"></canvas>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div class="chart-title" style="margin-bottom:0">Best Time to Buy · Avg Price by Day</div>
+          <div id="best-day-badge" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 10px;border-radius:3px;border:1px solid var(--border2);color:var(--green)"></div>
+        </div>
+        <canvas id="chart-dow" height="200"></canvas>
       </div>
       <div class="chart-card">
         <div class="chart-title">Price vs Mileage · Current Listings</div>
@@ -715,7 +862,7 @@ HTML = """<!DOCTYPE html>
   <div id="tab-runs" style="display:none">
     <div style="background:var(--surface);border:1px solid var(--border);padding:20px">
       <div class="run-row" style="font-size:10px;letter-spacing:2px;color:var(--muted);font-weight:600">
-        <div>STARTED</div><div>STATUS</div><div>FOUND</div><div>NEW</div><div>CHANGES</div>
+        <div>STARTED</div><div>STATUS</div><div>FOUND</div><div>NEW</div><div>CHANGES</div><div>DURATION</div>
       </div>
       <div id="runs-list"><div style="color:var(--dim);font-family:monospace;font-size:12px;padding:20px 0">No runs yet</div></div>
     </div>
@@ -755,6 +902,49 @@ HTML = """<!DOCTYPE html>
       <div id="similar-listings" style="display:flex;flex-direction:column;gap:8px"></div>
     </div>
     
+    <!-- Negotiation Helper -->
+    <div id="neg-helper-wrap" style="margin-top:24px;display:none">
+      <div style="font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:12px">Negotiation Helper</div>
+      <div id="neg-helper-content"></div>
+    </div>
+
+    <!-- Ownership Calculator -->
+    <div id="ownership-wrap" style="margin-top:24px;display:none">
+      <div style="font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:12px">Total Ownership Cost</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:4px;font-family:monospace">DEPOSIT (R)</div>
+          <input id="oc-deposit" type="number" value="50000" oninput="calcOwnership()" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:monospace;font-size:12px;outline:none">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:4px;font-family:monospace">LOAN TERM</div>
+          <select id="oc-term" onchange="calcOwnership()" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:monospace;font-size:12px;outline:none">
+            <option value="48">48 months</option>
+            <option value="60" selected>60 months</option>
+            <option value="72">72 months</option>
+            <option value="84">84 months</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:4px;font-family:monospace">INTEREST RATE (%)</div>
+          <input id="oc-rate" type="number" value="12.5" step="0.25" oninput="calcOwnership()" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:monospace;font-size:12px;outline:none">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:4px;font-family:monospace">INSURANCE / MO (R)</div>
+          <input id="oc-insurance" type="number" value="1200" oninput="calcOwnership()" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:monospace;font-size:12px;outline:none">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:4px;font-family:monospace">FUEL / MO (R)</div>
+          <input id="oc-fuel" type="number" value="2500" oninput="calcOwnership()" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:monospace;font-size:12px;outline:none">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:4px;font-family:monospace">MAINTENANCE / YR (R)</div>
+          <input id="oc-maint" type="number" value="6000" oninput="calcOwnership()" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:monospace;font-size:12px;outline:none">
+        </div>
+      </div>
+      <div id="oc-results"></div>
+    </div>
+
     <button class="modal-close" style="margin-top:24px" onclick="closeModal()">Close</button>
   </div>
 </div>
@@ -780,15 +970,17 @@ async function loadSettings() {
   const res = await fetch('/api/settings');
   const d = await res.json();
   if (d.price_alert) document.getElementById('alert-price').value = d.price_alert;
+  if (d.wbc_url) document.getElementById('wbc-url').value = d.wbc_url;
 }
-async function saveAlert() {
-  const val = document.getElementById('alert-price').value;
+async function saveSettings() {
+  const price_alert = document.getElementById('alert-price').value;
+  const wbc_url = document.getElementById('wbc-url').value.trim();
   await fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({price_alert: val})
+    body: JSON.stringify({price_alert, wbc_url})
   });
-  alert('Price alert updated!');
+  alert('Settings saved!');
 }
 loadSettings();
 
@@ -994,11 +1186,25 @@ function updateStats() {
 
 function getDealScore(l, avgPrice) {
   if (!l.price || !avgPrice || !l.year || !l.mileage) return 0;
+  // Base factors
   let diffPct = (avgPrice - l.price) / avgPrice * 100;
   let milScore = (50000 - l.mileage) / 10000;
   let yearScore = (l.year - 2022) * 5;
-  let score = Math.round(50 + (diffPct * 2) + milScore + yearScore);
-  return Math.max(0, Math.min(100, score));
+  let score = 50 + (diffPct * 2) + milScore + yearScore;
+  // Days-on-market bonus (longer = more negotiation room)
+  if (l.first_seen) {
+    const end = (l.is_active || !l.last_seen) ? new Date() : new Date(l.last_seen);
+    const dom = Math.floor((end - new Date(l.first_seen)) / 86400000);
+    if (dom >= 60) score += 8;
+    else if (dom >= 30) score += 5;
+    else if (dom >= 15) score += 2;
+  }
+  // Price drop bonus: 1 pt per 1% total drop, capped at +10
+  if (l.prev_price && l.prev_price > l.price) {
+    const dropPct = (l.prev_price - l.price) / l.prev_price * 100;
+    score += Math.min(10, Math.round(dropPct));
+  }
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
 
 function renderTable() {
@@ -1009,6 +1215,7 @@ function renderTable() {
   let data = allListings;
   if (filterStatus === 'active') data = data.filter(l => l.is_active === 1);
   if (filterStatus === 'gone') data = data.filter(l => l.is_active === 0);
+  if (filterStatus === 'watchlisted') data = data.filter(l => l.watchlisted);
   
   if (filterYear !== 'all') data = data.filter(l => l.year === filterYear);
   if (filterLocation !== 'all') data = data.filter(l => l.location === filterLocation);
@@ -1049,7 +1256,7 @@ function renderTable() {
 
   const tbody = document.getElementById('listings-tbody');
   if (!data.length) {
-    tbody.innerHTML = `<tr><td colspan="12"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="14"><div class="empty-state">
       <div class="icon">🔍</div>
       <div class="msg">No listings</div>
       <div class="sub">Run a scrape or adjust filters</div>
@@ -1082,6 +1289,25 @@ function renderTable() {
     const tr = document.createElement('tr');
     if (l.is_active === 0) tr.style.opacity = '0.5';
 
+    // 0. Star (watchlist)
+    const tdStar = document.createElement('td');
+    tdStar.style.cssText = 'text-align:center;padding:4px 6px';
+    const btnStar = document.createElement('button');
+    btnStar.className = 'star-btn' + (l.watchlisted ? ' starred' : '');
+    btnStar.textContent = l.watchlisted ? '★' : '☆';
+    btnStar.title = l.watchlisted ? 'Remove from watchlist' : 'Add to watchlist';
+    btnStar.onclick = async (e) => {
+      e.stopPropagation();
+      const res = await fetch(`/api/listings/${l.id}/watchlist`, { method: 'POST' });
+      const d = await res.json();
+      l.watchlisted = d.watchlisted ? 1 : 0;
+      btnStar.textContent = l.watchlisted ? '★' : '☆';
+      btnStar.className = 'star-btn' + (l.watchlisted ? ' starred' : '');
+      btnStar.title = l.watchlisted ? 'Remove from watchlist' : 'Add to watchlist';
+    };
+    tdStar.appendChild(btnStar);
+    tr.appendChild(tdStar);
+
     // 1. #
     const tdRank = document.createElement('td');
     tdRank.className = 'rank-num';
@@ -1097,6 +1323,7 @@ function renderTable() {
       const img = document.createElement('img');
       img.src = l.image;
       img.alt = '';
+      img.className = 'listing-thumb';
       img.style.cssText = 'width:72px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;background:var(--surface);border:1px solid var(--border);';
       img.onerror = function() { this.style.display='none'; };
       tdListing.appendChild(img);
@@ -1253,11 +1480,17 @@ const chartDefaults = {
 };
 
 async function renderCharts() {
-  const marketRes = await fetch('/api/market').then(r => r.json());
+  const [marketRes, analyticsRes] = await Promise.all([
+    fetch('/api/market').then(r => r.json()),
+    fetch('/api/analytics').then(r => r.json()),
+  ]);
   const market = marketRes.chart;
   const vel = marketRes.velocity_30d;
+  const forecast = analyticsRes.forecast || [];
+  const dowData = analyticsRes.dow || [];
+  const slope = analyticsRes.slope;
   const listings = allListings;
-  
+
   // Update Velocity Badge
   const velBadge = document.getElementById('velocity-badge');
   if (vel !== undefined && vel !== 0) {
@@ -1273,31 +1506,116 @@ async function renderCharts() {
     }
   }
 
-  // Market avg chart
-  if (charts.market) charts.market.destroy();
-  charts.market = new Chart(document.getElementById('chart-market'), {
+  // ── Forecast chart (historical + projected) ──────────────────────────────
+  const forecastBadge = document.getElementById('forecast-badge');
+  if (slope !== null && slope !== undefined) {
+    forecastBadge.style.display = 'inline-block';
+    if (slope < 0) {
+      forecastBadge.style.color = 'var(--green)';
+      forecastBadge.style.borderColor = 'rgba(63,185,80,0.4)';
+      forecastBadge.textContent = '▼ Trending down R' + Math.abs(slope).toFixed(0) + '/day';
+    } else {
+      forecastBadge.style.color = 'var(--red)';
+      forecastBadge.style.borderColor = 'rgba(248,81,73,0.4)';
+      forecastBadge.textContent = '▲ Trending up R' + slope.toFixed(0) + '/day';
+    }
+  }
+
+  const histLabels = market.map(d => d.date);
+  const histPrices = market.map(d => d.avg_price);
+  // Pad historical arrays so forecast starts right after
+  const forecastLabels = forecast.map(d => d.date);
+  const forecastPrices = forecast.map(d => d.projected_price);
+  const allLabels = [...histLabels, ...forecastLabels];
+  // Historical dataset: null for forecast positions
+  const histPadded = [...histPrices, ...Array(forecastLabels.length).fill(null)];
+  // Forecast dataset: null for historical positions, then projected (overlap 1 point for continuity)
+  const forecastPadded = [...Array(histPrices.length - 1).fill(null), histPrices[histPrices.length - 1] ?? null, ...forecastPrices];
+
+  if (charts.forecast) charts.forecast.destroy();
+  charts.forecast = new Chart(document.getElementById('chart-forecast'), {
     type: 'line',
     data: {
-      labels: market.map(d => d.date),
-      datasets: [{
-        data: market.map(d => d.avg_price),
-        borderColor: '#d4a843',
-        backgroundColor: 'rgba(212,168,67,0.08)',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 4,
-        pointBackgroundColor: '#d4a843',
-      }]
+      labels: allLabels,
+      datasets: [
+        {
+          label: 'Historical',
+          data: histPadded,
+          borderColor: '#d4a843',
+          backgroundColor: 'rgba(212,168,67,0.07)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: '#d4a843',
+          spanGaps: false,
+        },
+        {
+          label: 'Forecast',
+          data: forecastPadded,
+          borderColor: '#58a6ff',
+          backgroundColor: 'rgba(88,166,255,0.06)',
+          fill: true,
+          tension: 0.3,
+          borderDash: [6, 4],
+          pointRadius: 2,
+          pointBackgroundColor: '#58a6ff',
+          spanGaps: false,
+        },
+      ]
     },
     options: {
       ...chartDefaults,
-      plugins: { ...chartDefaults.plugins },
+      plugins: {
+        legend: { display: true, labels: { color: '#7d8590', font: { family: 'IBM Plex Mono', size: 10 }, boxWidth: 20 } },
+      },
       scales: {
         ...chartDefaults.scales,
         y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } }
       }
     }
   });
+
+  // ── Best time to buy — day of week ────────────────────────────────────────
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  if (dowData.length > 0) {
+    const minPrice = Math.min(...dowData.map(d => d.avg_price));
+    const bestDayBadge = document.getElementById('best-day-badge');
+    const bestRow = dowData.find(d => d.avg_price === minPrice);
+    if (bestRow) {
+      bestDayBadge.style.display = 'inline-block';
+      bestDayBadge.textContent = 'Best: ' + DAY_NAMES[bestRow.dow] + ' · R' + Math.round(minPrice).toLocaleString();
+    }
+    const dowColors = dowData.map(d =>
+      d.avg_price === minPrice ? 'rgba(63,185,80,0.75)' : 'rgba(212,168,67,0.45)'
+    );
+    const dowBorders = dowData.map(d =>
+      d.avg_price === minPrice ? '#3fb950' : '#d4a843'
+    );
+    if (charts.dow) charts.dow.destroy();
+    charts.dow = new Chart(document.getElementById('chart-dow'), {
+      type: 'bar',
+      data: {
+        labels: dowData.map(d => DAY_NAMES[d.dow]),
+        datasets: [{
+          data: dowData.map(d => d.avg_price),
+          backgroundColor: dowColors,
+          borderColor: dowBorders,
+          borderWidth: 1,
+        }]
+      },
+      options: {
+        ...chartDefaults,
+        plugins: { legend: { display: false } },
+        scales: {
+          ...chartDefaults.scales,
+          y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } }
+        }
+      }
+    });
+  }
+
+  // (Legacy market chart removed — forecast chart replaces it)
+  if (charts.market) { charts.market.destroy(); charts.market = null; }
 
   // Scatter: price vs mileage
   const scatterData = listings.filter(l => l.price && l.mileage).map(l => ({ x: l.mileage, y: l.price }));
@@ -1349,6 +1667,144 @@ async function renderCharts() {
       plugins: { legend: { display: true, labels: { color: '#7d8590', font: { family: 'IBM Plex Mono', size: 11 } } } }
     }
   });
+}
+
+// ─── NEGOTIATION HELPER ─────────────────────────────────────────────────────
+function renderNegHelper(l, avgPrice) {
+  const wrap = document.getElementById('neg-helper-wrap');
+  if (!l || !l.price) { wrap.style.display = 'none'; return; }
+
+  let discount = 0;
+  const reasons = [];
+
+  // Days on market
+  if (l.first_seen) {
+    const end = (l.is_active || !l.last_seen) ? new Date() : new Date(l.last_seen);
+    const dom = Math.floor((end - new Date(l.first_seen)) / 86400000);
+    if (dom >= 60)      { discount += 6; reasons.push(`Listed ${dom} days — stale stock, sellers are motivated`); }
+    else if (dom >= 30) { discount += 4; reasons.push(`Listed ${dom} days — been sitting a while`); }
+    else if (dom >= 15) { discount += 2; reasons.push(`Listed ${dom} days — some room to negotiate`); }
+    else                { reasons.push(`Only listed ${dom} days — seller unlikely to budge much yet`); }
+  }
+
+  // vs market average
+  if (avgPrice && l.price) {
+    const diff = ((l.price - avgPrice) / avgPrice * 100);
+    if (diff > 10)      { discount += 4; reasons.push(`${diff.toFixed(0)}% above market average — overpriced`); }
+    else if (diff > 5)  { discount += 2; reasons.push(`${diff.toFixed(0)}% above market average`); }
+    else if (diff < -5) { reasons.push(`${Math.abs(diff).toFixed(0)}% below market average — already a good price`); }
+  }
+
+  // Prior price drops
+  if (l.prev_price && l.price < l.prev_price) {
+    const dropPct = ((l.prev_price - l.price) / l.prev_price * 100).toFixed(1);
+    discount += 2;
+    reasons.push(`Seller already dropped price ${dropPct}% (R${(l.prev_price - l.price).toLocaleString()})`);
+  }
+
+  // Compute offer range (round to nearest R1k)
+  const round1k = v => Math.round(v / 1000) * 1000;
+  const openingOffer = round1k(l.price * (1 - (discount + 3) / 100));
+  const targetOffer  = round1k(l.price * (1 - discount / 100));
+  const savings = l.price - openingOffer;
+
+  const negEl = document.getElementById('neg-helper-content');
+
+  // Offer range strip
+  const rangeDiv = document.createElement('div');
+  rangeDiv.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px';
+  rangeDiv.innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);padding:12px">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:1px;font-family:monospace;margin-bottom:4px">OPENING OFFER</div>
+      <div style="font-size:20px;font-weight:700;font-family:monospace;color:var(--green)">${fmt(openingOffer)}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px">Save up to ${fmt(savings)} off asking</div>
+    </div>
+    <div style="background:var(--bg);border:1px solid var(--border);padding:12px">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:1px;font-family:monospace;margin-bottom:4px">TARGET / WALK-AWAY</div>
+      <div style="font-size:20px;font-weight:700;font-family:monospace;color:var(--gold)">${fmt(targetOffer)}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px">Based on ${discount}% leverage found</div>
+    </div>`;
+  negEl.innerHTML = '';
+  negEl.appendChild(rangeDiv);
+
+  // Script suggestion
+  const script = document.createElement('div');
+  script.style.cssText = 'background:rgba(212,168,67,0.06);border:1px solid rgba(212,168,67,0.2);padding:12px;margin-bottom:12px;font-size:12px;color:var(--text);line-height:1.6';
+  script.textContent = `"I've done my research and similar vehicles are going for around ${fmt(Math.round((avgPrice || l.price) / 1000) * 1000)}. Would you consider ${fmt(openingOffer)}?"`;
+  negEl.appendChild(script);
+
+  // Reasons list
+  if (reasons.length) {
+    const ul = document.createElement('ul');
+    ul.style.cssText = 'list-style:none;display:flex;flex-direction:column;gap:5px';
+    reasons.forEach(r => {
+      const li = document.createElement('li');
+      li.style.cssText = 'font-size:11px;color:var(--muted);padding-left:12px;position:relative';
+      li.textContent = r;
+      li.style.setProperty('--dot', '"·"');
+      const dot = document.createElement('span');
+      dot.style.cssText = 'position:absolute;left:0;color:var(--gold)';
+      dot.textContent = '·';
+      li.prepend(dot);
+      ul.appendChild(li);
+    });
+    negEl.appendChild(ul);
+  }
+
+  wrap.style.display = 'block';
+}
+
+// ─── OWNERSHIP CALCULATOR ───────────────────────────────────────────────────
+let _ocPrice = 0;
+function calcOwnership() {
+  if (!_ocPrice) return;
+  const deposit   = Math.max(0, parseFloat(document.getElementById('oc-deposit').value)   || 0);
+  const term      = parseInt(document.getElementById('oc-term').value)    || 60;
+  const annualRate= parseFloat(document.getElementById('oc-rate').value)  || 12.5;
+  const insurance = parseFloat(document.getElementById('oc-insurance').value) || 0;
+  const fuel      = parseFloat(document.getElementById('oc-fuel').value)      || 0;
+  const maint     = parseFloat(document.getElementById('oc-maint').value)     || 0;
+
+  const principal = Math.max(0, _ocPrice - deposit);
+  const r = annualRate / 100 / 12;
+  const installment = (principal === 0 || r === 0)
+    ? principal / term
+    : principal * r * Math.pow(1 + r, term) / (Math.pow(1 + r, term) - 1);
+
+  const monthlyAll = installment + insurance + fuel + maint / 12;
+  const totalCost  = deposit + monthlyAll * term;
+  const totalInterest = Math.max(0, installment * term - principal);
+  const years = term / 12;
+
+  const el = document.getElementById('oc-results');
+  el.innerHTML = '';
+
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px';
+  [
+    ['MONTHLY INSTALL.', fmt(Math.round(installment)), 'var(--gold)'],
+    ['MONTHLY ALL-IN',   fmt(Math.round(monthlyAll)),  'var(--text)'],
+    [`TOTAL ${years}YR COST`, fmt(Math.round(totalCost)), 'var(--red)'],
+  ].forEach(([label, value, color]) => {
+    const card = document.createElement('div');
+    card.style.cssText = 'background:var(--bg);border:1px solid var(--border);padding:12px';
+    const lEl = document.createElement('div');
+    lEl.style.cssText = 'font-size:10px;color:var(--muted);letter-spacing:1px;font-family:monospace;margin-bottom:4px';
+    lEl.textContent = label;
+    const vEl = document.createElement('div');
+    vEl.style.cssText = `font-size:18px;font-weight:700;font-family:monospace;color:${color}`;
+    vEl.textContent = value;
+    card.appendChild(lEl);
+    card.appendChild(vEl);
+    grid.appendChild(card);
+  });
+  el.appendChild(grid);
+
+  const note = document.createElement('div');
+  note.style.cssText = 'font-size:11px;color:var(--muted)';
+  note.textContent = `Interest paid over loan: ${fmt(Math.round(totalInterest))}  ·  `
+    + `Monthly: ${fmt(Math.round(installment))} loan + ${fmt(insurance)} insure + ${fmt(fuel)} fuel + ${fmt(Math.round(maint/12))} service`;
+  el.appendChild(note);
 }
 
 // ─── HISTORY MODAL ─────────────────────────────────────────────────────────
@@ -1418,6 +1874,20 @@ async function showHistory(id, title) {
       document.getElementById('similar-listings').innerHTML = html;
     }
   }
+
+  // Negotiation helper + Ownership calculator
+  if (me && me.price) {
+    const activePrices = allListings.filter(l => l.is_active && l.price).map(l => l.price);
+    const marketAvg = activePrices.length ? activePrices.reduce((a,b)=>a+b,0)/activePrices.length : 0;
+    renderNegHelper(me, marketAvg);
+
+    _ocPrice = me.price;
+    document.getElementById('ownership-wrap').style.display = 'block';
+    calcOwnership();
+  } else {
+    document.getElementById('neg-helper-wrap').style.display = 'none';
+    document.getElementById('ownership-wrap').style.display = 'none';
+  }
 }
 
 function closeModal() {
@@ -1432,15 +1902,24 @@ async function loadRuns() {
   const runs = await fetch('/api/runs').then(r => r.json());
   const el = document.getElementById('runs-list');
   if (!runs.length) { el.innerHTML = '<div style="color:var(--dim);font-family:monospace;font-size:12px;padding:20px 0">No runs yet</div>'; return; }
-  el.innerHTML = runs.map(r => `
+  el.innerHTML = runs.map(r => {
+    let dur = '—';
+    if (r.started_at && r.finished_at) {
+      const secs = Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000);
+      dur = secs >= 60 ? `${Math.floor(secs/60)}m ${secs%60}s` : `${secs}s`;
+    } else if (r.status === 'running') {
+      dur = '⟳';
+    }
+    return `
     <div class="run-row">
       <div>${fmtDate(r.started_at)}</div>
       <div><span class="status-dot ${r.status}"></span>${r.status}</div>
       <div>${r.listings_found ?? '—'}</div>
       <div style="color:var(--green)">${r.new_listings ?? '—'}</div>
       <div style="color:var(--gold)">${r.price_changes ?? '—'}</div>
-    </div>
-  `).join('');
+      <div style="color:var(--muted)">${dur}</div>
+    </div>`;
+  }).join('');
 }
 
 // ─── DEALERS ───────────────────────────────────────────────────────────────
@@ -1502,6 +1981,88 @@ function renderDealers() {
     tbody.appendChild(tr);
   });
 }
+
+// ─── THEME ─────────────────────────────────────────────────────────────────
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  const next = isLight ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next === 'dark' ? '' : 'light');
+  document.getElementById('theme-btn').textContent = next === 'light' ? '🌙' : '☀';
+  localStorage.setItem('dr_theme', next);
+}
+(function initTheme() {
+  const saved = localStorage.getItem('dr_theme');
+  if (saved === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.getElementById('theme-btn').textContent = '🌙';
+  }
+})();
+
+// ─── COMPACT VIEW ──────────────────────────────────────────────────────────
+function toggleCompact() {
+  const isCompact = document.body.classList.toggle('compact');
+  document.getElementById('compact-btn').textContent = isCompact ? '⊞' : '⊟';
+  localStorage.setItem('dr_compact', isCompact ? '1' : '0');
+}
+(function initCompact() {
+  if (localStorage.getItem('dr_compact') === '1') {
+    document.body.classList.add('compact');
+    document.getElementById('compact-btn').textContent = '⊞';
+  }
+})();
+
+// ─── SEARCH PROFILES ───────────────────────────────────────────────────────
+function _getProfiles() {
+  try { return JSON.parse(localStorage.getItem('dr_profiles') || '[]'); } catch(e) { return []; }
+}
+function _saveProfiles(arr) {
+  localStorage.setItem('dr_profiles', JSON.stringify(arr));
+}
+function _renderProfileSelect() {
+  const sel = document.getElementById('profiles-select');
+  const profiles = _getProfiles();
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">-- saved profiles --</option>' +
+    profiles.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+  if (profiles.find(p => p.name === cur)) sel.value = cur;
+}
+function saveProfile() {
+  const name = prompt('Profile name:', '');
+  if (!name) return;
+  const profiles = _getProfiles().filter(p => p.name !== name);
+  profiles.push({ name, year: filterYear, location: filterLocation, status: filterStatus, sortKey, sortAsc });
+  _saveProfiles(profiles);
+  _renderProfileSelect();
+  document.getElementById('profiles-select').value = name;
+}
+function loadProfile(name) {
+  if (!name) return;
+  const p = _getProfiles().find(x => x.name === name);
+  if (!p) return;
+  filterYear = p.year || 'all';
+  filterLocation = p.location || 'all';
+  filterStatus = p.status || 'active';
+  sortKey = p.sortKey || 'change';
+  sortAsc = !!p.sortAsc;
+  // Sync UI
+  document.getElementById('filter-status').value = filterStatus;
+  document.getElementById('filter-location').value = filterLocation;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    if (['All','2022','2023','2024'].includes(b.textContent)) {
+      b.classList.toggle('active', b.textContent === (filterYear === 'all' ? 'All' : filterYear));
+    }
+  });
+  renderTable();
+}
+function deleteProfile() {
+  const sel = document.getElementById('profiles-select');
+  const name = sel.value;
+  if (!name) return;
+  if (!confirm(`Delete profile "${name}"?`)) return;
+  _saveProfiles(_getProfiles().filter(p => p.name !== name));
+  _renderProfileSelect();
+}
+_renderProfileSelect();
 
 // ─── INIT ──────────────────────────────────────────────────────────────────
 loadListings();
