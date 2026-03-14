@@ -90,7 +90,7 @@ def _parse_wbc(page, log) -> list[dict]:
                             
                     results.append({
                         "title": raw_title,
-                        "model": model,
+                        "variant": model,
                         "price_raw": str(offers.get("price", "")),
                         "price": price,
                         "year": year,
@@ -164,11 +164,21 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None) -> l
 
             time.sleep(random.uniform(1.5, 3.0))
 
-            # Scroll to trigger lazy loading
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-            time.sleep(0.8)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(0.8)
+            # Incremental scroll to trigger lazy loading on each tile
+            page.evaluate("""
+                async () => {
+                    const step = 400;
+                    const delay = ms => new Promise(r => setTimeout(r, ms));
+                    let pos = 0;
+                    while (pos < document.body.scrollHeight) {
+                        pos += step;
+                        window.scrollTo(0, pos);
+                        await delay(80);
+                    }
+                    window.scrollTo(0, 0);
+                }
+            """)
+            time.sleep(1.5)
 
             # Extract listings via multiple selector strategies
             page_listings = page.evaluate("""
@@ -227,9 +237,23 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None) -> l
                             const href = linkEl ? linkEl.getAttribute('href') : '';
                             const url = href.startsWith('http') ? href : 'https://www.autotrader.co.za' + href;
 
-                            // Image
+                            // Image — check all lazy-load attributes
                             const imgEl = tile.querySelector('img');
-                            const image = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
+                            let image = '';
+                            if (imgEl) {
+                                image = imgEl.src ||
+                                        imgEl.dataset.src ||
+                                        imgEl.dataset.lazySrc ||
+                                        imgEl.dataset.original ||
+                                        imgEl.dataset.lazy ||
+                                        imgEl.getAttribute('data-lazy-src') ||
+                                        imgEl.getAttribute('data-original') ||
+                                        (imgEl.srcset ? imgEl.srcset.split(' ')[0] : '') || '';
+                                // Discard placeholders (data URIs, tiny tracking pixels)
+                                if (image.startsWith('data:') || image.includes('placeholder') || image.includes('blank.gif')) {
+                                    image = imgEl.dataset.src || imgEl.getAttribute('data-lazy-src') || imgEl.getAttribute('data-original') || '';
+                                }
+                            }
 
                             // Fix title if it's just a number or empty, and grab 'model' string
                             if (!title || /^\\d+$/.test(title) || title.length < 8 || title.includes("Price") || title === 'Vehicle') {
@@ -258,7 +282,7 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None) -> l
                             }
 
                             if (price || title) {
-                                results.push({ price, title, model, year, mileage: mileageText, location, dealer, url, image });
+                                results.push({ price, title, variant: model, year, mileage: mileageText, location, dealer, url, image });
                             }
                         } catch(e) {}
                     });
@@ -294,20 +318,20 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None) -> l
                     else:
                         raw_title = "Chery Tiggo 8 Pro"
                 
-                raw_model = item.get("model", "").replace("\n", " ").strip()
-                
-                if not raw_model and raw_title:
+                raw_variant = item.get("variant", "").replace("\n", " ").strip()
+
+                if not raw_variant and raw_title:
                     words = raw_title.split(' ')
                     if len(words) > 1:
                         if words[0].isdigit() and len(words) > 2:
-                            raw_model = words[2]
+                            raw_variant = words[2]
                         else:
-                            raw_model = words[1]
-                
+                            raw_variant = words[1]
+
 
                 listing = {
                     "title": raw_title,
-                    "model": raw_model,
+                    "variant": raw_variant,
                     "price_raw": item.get("price", "").strip(),
                     "price": parsed_price,
                     "year": item.get("year", "").strip(),
@@ -444,11 +468,21 @@ def scrape_single_url(url: str, headless: bool = True, status_callback=None) -> 
                     const dealer = getElText('[data-testid="dealer-name"], span[class*="e-name"]');
 
                     let imgUrl = '';
-                    const imgEl = document.querySelector('img.e-gallery-image__-Otz2bA3mQj') || 
-                                  document.querySelector('.gallery img') || 
-                                  document.querySelector('meta[property="og:image"]');
-                    if (imgEl) {
-                        imgUrl = imgEl.content || imgEl.src;
+                    // Try OG meta tag first (most reliable for detail pages)
+                    const ogImg = document.querySelector('meta[property="og:image"]');
+                    if (ogImg) {
+                        imgUrl = ogImg.content || '';
+                    }
+                    if (!imgUrl) {
+                        const imgEl = document.querySelector('.gallery img, [class*="gallery"] img, [class*="Gallery"] img, img[class*="main"], img[class*="hero"]');
+                        if (imgEl) {
+                            imgUrl = imgEl.src || imgEl.dataset.src || imgEl.dataset.lazySrc || imgEl.getAttribute('data-lazy-src') || imgEl.getAttribute('data-original') || '';
+                            if (imgUrl.startsWith('data:')) imgUrl = imgEl.dataset.src || imgEl.getAttribute('data-lazy-src') || '';
+                        }
+                    }
+                    if (!imgUrl) {
+                        const firstImg = document.querySelector('img[src*="autotrader"], img[src*="cloudinary"], img[src*="imgix"]');
+                        if (firstImg) imgUrl = firstImg.src || '';
                     }
 
                     return { price_raw, title, year, mileage_raw, location, dealer, image: imgUrl, url: window.location.href };

@@ -166,7 +166,15 @@ def listing_history(listing_id):
 
 @app.route("/api/market")
 def market():
-    return jsonify(get_market_snapshots())
+    snapshots = get_market_snapshots()
+    # Calculate 30-day velocity (avg price change per month)
+    velocity = None
+    if len(snapshots) >= 2:
+        oldest = snapshots[0]["avg_price"]
+        newest = snapshots[-1]["avg_price"]
+        days = len(snapshots)
+        velocity = round((newest - oldest) / days * 30) if days else 0
+    return jsonify({"chart": snapshots, "velocity_30d": velocity})
 
 
 @app.route("/api/runs")
@@ -1019,7 +1027,7 @@ function renderTable() {
     else if (sortKey === 'year') { valA = a.year||0; valB = b.year||0; }
     else if (sortKey === 'score') { valA = a._dealScore; valB = b._dealScore; }
     else if (sortKey === 'source') { valA = a.source||''; valB = b.source||''; }
-    else if (sortKey === 'model') { valA = a.model||''; valB = b.model||''; }
+    else if (sortKey === 'model') { valA = a.variant||''; valB = b.variant||''; }
     else if (sortKey === 'title') { valA = a.title||''; valB = b.title||''; }
     else if (sortKey === 'location') { valA = a.location||''; valB = b.location||''; }
     else if (sortKey === 'status') { valA = a.is_active||0; valB = b.is_active||0; }
@@ -1082,6 +1090,19 @@ function renderTable() {
 
     // 2. Listing
     const tdListing = document.createElement('td');
+    tdListing.style.cssText = 'display:flex;align-items:center;gap:10px;';
+
+    // Thumbnail
+    if (l.image) {
+      const img = document.createElement('img');
+      img.src = l.image;
+      img.alt = '';
+      img.style.cssText = 'width:72px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;background:var(--surface);border:1px solid var(--border);';
+      img.onerror = function() { this.style.display='none'; };
+      tdListing.appendChild(img);
+    }
+
+    const divListingText = document.createElement('div');
     const divTitle = document.createElement('div');
     divTitle.className = 'listing-title';
     const aTitle = document.createElement('a');
@@ -1104,14 +1125,15 @@ function renderTable() {
     spanSeen.innerHTML = 'Seen: ' + (l.first_seen ? l.first_seen.slice(0,10) : '—') + ageHtml;
     divMeta.appendChild(spanSeen);
     
-    tdListing.appendChild(divTitle);
-    tdListing.appendChild(divMeta);
+    divListingText.appendChild(divTitle);
+    divListingText.appendChild(divMeta);
+    tdListing.appendChild(divListingText);
     tr.appendChild(tdListing);
 
-    // 2b. Model
+    // 2b. Variant
     const tdMod = document.createElement('td');
     tdMod.style.fontFamily = 'monospace';
-    tdMod.textContent = l.model || '—';
+    tdMod.textContent = l.variant || '—';
     tr.appendChild(tdMod);
 
     // 3. Source
