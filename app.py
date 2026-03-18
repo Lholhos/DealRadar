@@ -7,12 +7,14 @@ import threading
 import queue
 import time
 import schedule
-from flask import Flask, jsonify, render_template_string, request
+from functools import wraps
+from flask import Flask, jsonify, render_template_string, request, Response
 from scraper import scrape, scrape_single_url
 from database import (
     upsert_listings,
     get_listings_with_latest_price,
     get_price_history,
+    get_price_changes,
     get_market_snapshots,
     get_day_of_week_prices,
     get_recent_runs,
@@ -21,9 +23,31 @@ from database import (
     get_setting,
     set_setting,
     toggle_watchlist,
+    send_telegram_msg,
+    get_telegram_updates,
 )
 
 app = Flask(__name__)
+app.secret_key = "dealradar-secret-x7r2-9v4k"
+
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Only require auth if a password is set in settings
+        password = get_setting("admin_password")
+        if not password:
+            return f(*args, **kwargs)
+        
+        auth = request.authorization
+        if auth and auth.username == "admin" and auth.password == password:
+            return f(*args, **kwargs)
+        
+        return Response(
+            'Could not verify your access level for that URL.\n'
+            'You have to login with proper credentials (username: admin)', 401,
+            {'WWW-Authenticate': 'Basic realm="Login Required"'}
+        )
+    return decorated
 
 # Global scrape state
 _scrape_lock = threading.Lock()
@@ -66,7 +90,10 @@ def _do_scrape():
 
     try:
         wbc_url = get_setting("wbc_url", "") or None
-        listings = scrape(max_pages=10, headless=True, status_callback=log, wbc_url=wbc_url)
+        max_price_str = get_setting("max_price", "")
+        max_price = int(max_price_str) if max_price_str and max_price_str.isdigit() else None
+        
+        listings = scrape(max_pages=10, headless=True, status_callback=log, wbc_url=wbc_url, max_price=max_price)
         stats = upsert_listings(listings)
         stats["total"] = len(listings)
         finish_run(run_id, stats)
@@ -80,11 +107,13 @@ def _do_scrape():
 
 
 @app.route("/")
+@require_auth
 def index():
     return render_template_string(HTML)
 
 
 @app.route("/api/scrape", methods=["POST"])
+@require_auth
 def trigger_scrape():
     with _scrape_lock:
         if _scrape_status["running"]:
@@ -98,15 +127,23 @@ def trigger_scrape():
 
 
 @app.route("/api/scrape/url", methods=["POST"])
+@require_auth
 def trigger_scrape_url():
     data = request.json or {}
-    url = data.get("url")
+    url = data.get("url", "").strip()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
+        
+    # Security: URL Validation
+    allowed_domains = ["autotrader.co.za", "webuycars.co.za"]
+    if not any(domain in url.lower() for domain in allowed_domains):
+        return jsonify({"error": "Invalid domain. Only AutoTrader and WeBuyCars URLs are allowed."}), 400
         
     with _scrape_lock:
         if _scrape_status["running"]:
             return jsonify({"error": "Scrape already in progress"}), 409
+        _scrape_status["running"] = True
+        _scrape_status["log"] = ["Starting single URL scrape..."]
         _scrape_status["running"] = True
         _scrape_status["log"] = [f"Scraping single URL: {url}"]
 
@@ -138,6 +175,7 @@ def trigger_scrape_url():
 
 
 @app.route("/api/scrape/status")
+@require_auth
 def scrape_status():
     return jsonify({
         "running": _scrape_status["running"],
@@ -146,12 +184,14 @@ def scrape_status():
 
 
 @app.route("/api/listings")
+@require_auth
 def listings():
     include_inactive = request.args.get("include_inactive", "0") == "1"
     data = get_listings_with_latest_price(include_inactive=include_inactive)
     return jsonify(data)
 
 @app.route("/api/settings", methods=["GET", "POST"])
+@require_auth
 def settings_api():
     if request.method == "POST":
         data = request.json or {}
@@ -159,17 +199,56 @@ def settings_api():
             set_setting("price_alert", str(data["price_alert"]))
         if "wbc_url" in data:
             set_setting("wbc_url", str(data["wbc_url"]))
+        if "max_price" in data:
+            set_setting("max_price", str(data["max_price"]))
+        if "telegram_token" in data:
+            set_setting("telegram_token", str(data["telegram_token"]).strip())
+        if "telegram_chat_id" in data:
+            set_setting("telegram_chat_id", str(data["telegram_chat_id"]).strip())
+        if "admin_password" in data:
+            set_setting("admin_password", str(data["admin_password"]).strip())
         return jsonify({"ok": True})
-    return jsonify({"price_alert": get_setting("price_alert", ""), "wbc_url": get_setting("wbc_url", "")})
+    return jsonify({
+        "price_alert": get_setting("price_alert", ""),
+        "wbc_url": get_setting("wbc_url", ""),
+        "max_price": get_setting("max_price", ""),
+        "telegram_token": get_setting("telegram_token", ""),
+        "telegram_chat_id": get_setting("telegram_chat_id", ""),
+        "admin_password": get_setting("admin_password", "")
+    })
+
+@app.route("/api/test-telegram", methods=["POST"])
+@require_auth
+def test_telegram():
+    data = request.json or {}
+    token = data.get("telegram_token")
+    chat_id = data.get("telegram_chat_id")
+    
+    res = send_telegram_msg(
+        "<b>DealRadar</b>\nThis is a test notification! Your bot is configured correctly. 🚀",
+        token_override=token,
+        chat_id_override=chat_id
+    )
+    
+    if res and isinstance(res, (bytes, str)):
+        return jsonify({"ok": True})
+    
+    error_msg = "Unknown error"
+    if isinstance(res, dict) and "error" in res:
+        error_msg = res["error"]
+        
+    return jsonify({"error": f"Failed to send message: {error_msg}"}), 400
 
 
 @app.route("/api/listings/<int:listing_id>/history")
+@require_auth
 def listing_history(listing_id):
     data = get_price_history(listing_id)
     return jsonify(data)
 
 
 @app.route("/api/market")
+@require_auth
 def market():
     snapshots = get_market_snapshots()
     # Calculate 30-day velocity (avg price change per month)
@@ -183,6 +262,7 @@ def market():
 
 
 @app.route("/api/analytics")
+@require_auth
 def analytics():
     from datetime import datetime, timedelta
     snapshots = get_market_snapshots()
@@ -219,11 +299,19 @@ def analytics():
 
 
 @app.route("/api/runs")
+@require_auth
 def runs():
     return jsonify(get_recent_runs())
 
 
+@app.route("/api/price-changes")
+@require_auth
+def price_changes():
+    return jsonify(get_price_changes())
+
+
 @app.route("/api/listings/<int:listing_id>/watchlist", methods=["POST"])
+@require_auth
 def toggle_watchlist_route(listing_id):
     new_state = toggle_watchlist(listing_id)
     return jsonify({"watchlisted": new_state})
@@ -636,6 +724,7 @@ HTML = """<!DOCTYPE html>
   .cmp-table {
     width: 100%;
     border-collapse: collapse;
+    table-layout: fixed;
     margin-top: 20px;
     font-size: 12px;
   }
@@ -644,6 +733,8 @@ HTML = """<!DOCTYPE html>
     border: 1px solid var(--border);
     vertical-align: middle;
     text-align: left;
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
   .cmp-table .row-label {
     font-family: 'IBM Plex Mono', monospace;
@@ -657,8 +748,9 @@ HTML = """<!DOCTYPE html>
   }
   .cmp-table thead th {
     background: var(--bg);
-    min-width: 200px;
     vertical-align: top;
+    white-space: normal;
+    word-break: break-word;
   }
   .cmp-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
   .cmp-table tbody tr:hover { background: rgba(212,168,67,0.04); }
@@ -840,10 +932,7 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div id="market-insights" style="margin:0 auto 16px auto; max-width:1800px; padding:0 32px; font-size:12px; color:var(--muted); display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap;">
-  <span id="dup-insight" style="background:var(--surface); padding:4px 10px; border-radius:4px; border:1px solid var(--border); display:none; cursor:pointer" onclick="setStatus('duplicates');document.getElementById('filter-status').value='duplicates'">
-    <span style="color:var(--gold)">⚡</span> <span id="dup-insight-text"></span>
-  </span>
-  <span id="mileage-sweet-spot" style="background:var(--surface); padding:4px 10px; border-radius:4px; border:1px solid var(--border); display:none">
+<span id="mileage-sweet-spot" style="background:var(--surface); padding:4px 10px; border-radius:4px; border:1px solid var(--border); display:none">
     <i class="icon" style="color:var(--gold)">⚡</i> <span id="mss-text"></span>
   </span>
 </div>
@@ -859,12 +948,28 @@ HTML = """<!DOCTYPE html>
       
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
         <span style="font-size:12px;color:var(--muted)">WBC URL:</span>
-        <input type="text" id="wbc-url" placeholder="WeBuyCars search URL..." style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:220px;font-family:inherit;font-size:12px;outline:none">
+        <input type="text" id="wbc-url" placeholder="WeBuyCars search URL..." style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:180px;font-family:inherit;font-size:12px;outline:none">
+        <span style="font-size:12px;color:var(--muted)">Max Price:</span>
+        <input type="number" id="max-price" placeholder="R450000" style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:90px;font-family:inherit;font-size:12px;outline:none">
         <span style="font-size:12px;color:var(--muted)">Alert:</span>
         <input type="number" id="alert-price" placeholder="R320000" style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:90px;font-family:inherit;font-size:12px;outline:none">
         <button onclick="saveSettings()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px">Save</button>
       </div>
     </div>
+    
+    <!-- Telegram Settings Row -->
+    <div style="display:flex; gap:12px; align-items:center; margin-top:12px; padding-top:12px; border-top:1px solid var(--border)">
+      <div style="display:flex; align-items:center; gap:8px">
+        <i class="icon" style="color:#229ED9; font-style:normal; font-size:14px">✈</i>
+        <span style="font-size:12px; color:var(--text); font-weight:600">Telegram Bot Notifications:</span>
+      </div>
+      <input type="password" id="tele-token" placeholder="Bot Token" style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:150px;font-family:inherit;font-size:12px;outline:none">
+      <input type="text" id="tele-chat" placeholder="Chat ID" style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:80px;font-family:inherit;font-size:12px;outline:none">
+      <input type="password" id="admin-pass" placeholder="Admin Password" style="padding:4px 8px;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:4px;width:120px;font-family:inherit;font-size:12px;outline:none">
+      <button onclick="testTelegram()" id="test-tele-btn" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px">Test</button>
+      <span style="font-size:11px; color:var(--muted)">Password protects this page.</span>
+    </div>
+
     <div class="scrape-log" id="scrape-log">
       <span style="color:var(--dim)">No scrape running. Click to fetch latest listings from AutoTrader.</span>
     </div>
@@ -875,6 +980,7 @@ HTML = """<!DOCTYPE html>
     <button class="tab-btn active" onclick="setTab('listings', this)">Listings</button>
     <button class="tab-btn" onclick="setTab('dealers', this)">Dealers</button>
     <button class="tab-btn" onclick="setTab('charts', this)">Charts</button>
+    <button class="tab-btn" onclick="setTab('price-changes', this)">Price Changes</button>
     <button class="tab-btn" onclick="setTab('runs', this)">Scrape History</button>
   </div>
 
@@ -895,10 +1001,11 @@ HTML = """<!DOCTYPE html>
         <option value="active">Active</option>
         <option value="gone">Gone (Sold)</option>
         <option value="watchlisted">Watchlisted ★</option>
-        <option value="duplicates">Duplicates ⚡</option>
         <option value="all">Any</option>
       </select>
+      <button id="loc-btn" onclick="openLocModal()" style="margin-left:16px;background:none;border:1px solid var(--border);color:var(--muted);padding:4px 10px;font-family:inherit;font-size:12px;cursor:pointer;border-radius:4px">📍 Set my location</button>
     </div>
+    <div id="chart-filter-badge" onclick="clearChartFilter()" style="display:none;background:rgba(212,168,67,0.1);border:1px solid var(--gold);color:var(--gold);font-size:11px;font-family:'IBM Plex Mono',monospace;padding:6px 14px;border-radius:4px;cursor:pointer;margin-bottom:8px"></div>
     <!-- Search Profiles -->
     <div class="profiles-row">
       <span class="prof-label">Profiles:</span>
@@ -925,12 +1032,13 @@ HTML = """<!DOCTYPE html>
             <th class="sortable" onclick="setSort('mileage')">Mileage <span class="sort-icon" id="sort-icon-mileage"></span></th>
             <th class="sortable" onclick="setSort('year')">Year <span class="sort-icon" id="sort-icon-year"></span></th>
             <th class="sortable" onclick="setSort('location')">Location & Dealer <span class="sort-icon" id="sort-icon-location"></span></th>
+            <th class="sortable" onclick="setSort('distance')" id="th-distance" style="display:none">Dist. <span class="sort-icon" id="sort-icon-distance"></span></th>
             <th class="sortable" onclick="setSort('status')">Status / Time to Sell <span class="sort-icon" id="sort-icon-status"></span></th>
             <th></th>
           </tr>
         </thead>
         <tbody id="listings-tbody">
-          <tr><td colspan="15" class="empty-state" style="padding:60px">
+          <tr><td colspan="16" class="empty-state" style="padding:60px">
             <div class="icon">🚗</div>
             <div class="msg">No data yet</div>
             <div class="sub">Run a scrape to fetch listings</div>
@@ -976,6 +1084,28 @@ HTML = """<!DOCTYPE html>
         </div>
         <canvas id="chart-heatmap" height="80"></canvas>
       </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div class="chart-title" style="margin-bottom:0">Price Change Activity · Drops vs Rises per Day</div>
+          <div id="pc-activity-badge" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted)"></div>
+        </div>
+        <canvas id="chart-pc-activity" height="100"></canvas>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="chart-title" style="margin-bottom:16px">Biggest Price Drops · Top 15 All-Time</div>
+        <canvas id="chart-pc-top" height="80"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Price Changes Tab -->
+  <div id="tab-price-changes" style="display:none">
+    <div style="background:var(--surface);border:1px solid var(--border);padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div style="font-size:10px;letter-spacing:2px;color:var(--muted);font-weight:600">ALL PRICE CHANGES — FULL HISTORY</div>
+        <div id="pc-summary" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+      <div id="pc-list"><div style="color:var(--muted);font-size:12px;padding:20px 0">Loading…</div></div>
     </div>
   </div>
 
@@ -1093,8 +1223,215 @@ let allListings = [];
 let filterYear = 'all';
 let filterLocation = 'all';
 let filterStatus = 'active';
+let filterPriceMin = 0;
+let filterPriceMax = 0;
 let sortKey = 'change';
 let sortAsc = false;
+
+// ── User location & distance ──────────────────────────────────────────────────
+let userLocation = null; // { lat, lng, label }
+(function() {
+  try {
+    const saved = localStorage.getItem('dealradar_userloc');
+    if (saved) userLocation = JSON.parse(saved);
+  } catch(e) {}
+})();
+
+const SA_CITIES = {
+  'johannesburg':[-26.2041,28.0473],'joburg':[-26.2041,28.0473],'jhb':[-26.2041,28.0473],
+  'sandton':[-26.1070,28.0567],'midrand':[-25.9974,28.1347],'randburg':[-26.0940,27.9906],
+  'roodepoort':[-26.1625,27.8697],'germiston':[-26.2278,28.1681],'boksburg':[-26.2145,28.2601],
+  'kempton park':[-26.0982,28.2298],'edenvale':[-26.1478,28.1602],'alberton':[-26.2690,28.1232],
+  'benoni':[-26.1879,28.3188],'brakpan':[-26.2348,28.3663],'springs':[-26.2495,28.4479],
+  'soweto':[-26.2678,27.8585],'fourways':[-26.0178,28.0117],'woodmead':[-26.0620,28.1013],
+  'sunninghill':[-26.0451,28.0898],'rivonia':[-26.0532,28.0598],'bryanston':[-26.0680,28.0104],
+  'northgate':[-26.1066,27.9695],'rosebank':[-26.1476,28.0426],'parktown':[-26.1877,28.0432],
+  'kyalami':[-25.9949,28.0727],'dainfern':[-26.0052,28.0250],'diepsloot':[-25.9370,28.0050],
+  'krugersdorp':[-26.0974,27.7658],'randfontein':[-26.1844,27.6882],'florida':[-26.1693,27.9116],
+  'pretoria':[-25.7479,28.2293],'tshwane':[-25.7479,28.2293],'centurion':[-25.8600,28.1892],
+  'hatfield':[-25.7481,28.2342],'menlyn':[-25.7869,28.2775],'lynnwood':[-25.7681,28.2919],
+  'soshanguve':[-25.5290,28.1008],'ga-rankuwa':[-25.6302,27.9984],'mabopane':[-25.5776,28.0741],
+  'cape town':[-33.9249,18.4241],'cpt':[-33.9249,18.4241],'bellville':[-33.8999,18.6297],
+  'brackenfell':[-33.8804,18.6804],'tygervalley':[-33.8740,18.6256],'parow':[-33.9025,18.5986],
+  'claremont':[-33.9876,18.4656],'tokai':[-34.0626,18.4625],'tableview':[-33.8311,18.4897],
+  'century city':[-33.8930,18.5125],'montague gardens':[-33.8727,18.5281],
+  'paarl':[-33.7303,18.9640],'stellenbosch':[-33.9321,18.8602],'somerset west':[-34.0831,18.8373],
+  'strand':[-34.1167,18.8317],'george':[-33.9646,22.4617],
+  'durban':[-29.8587,31.0218],'dbn':[-29.8587,31.0218],'pinetown':[-29.8181,30.8622],
+  'umhlanga':[-29.7309,31.0838],'westville':[-29.8386,30.9301],'chatsworth':[-29.9125,30.9270],
+  'pietermaritzburg':[-29.6006,30.3794],'pmb':[-29.6006,30.3794],
+  'port elizabeth':[-33.9608,25.6022],'gqeberha':[-33.9608,25.6022],'pe':[-33.9608,25.6022],
+  'east london':[-33.0292,27.8546],'bloemfontein':[-29.0852,26.1596],'bloem':[-29.0852,26.1596],
+  'polokwane':[-23.9045,29.4689],'nelspruit':[-25.4753,30.9694],'mbombela':[-25.4753,30.9694],
+  'witbank':[-25.8823,29.2369],'emalahleni':[-25.8823,29.2369],'middelburg':[-25.7719,29.4702],
+  'rustenburg':[-25.6753,27.2423],'klerksdorp':[-26.8672,26.6745],'potchefstroom':[-26.7148,27.0999],
+  'kimberley':[-28.7382,24.7693],'upington':[-28.4478,21.2561],
+  'vereeniging':[-26.6727,27.9258],'vanderbijlpark':[-26.7019,27.8318],'sasolburg':[-26.8148,27.8192],
+  'mafikeng':[-25.8484,25.6447],'mahikeng':[-25.8484,25.6447],'tzaneen':[-23.8325,30.1653],
+};
+
+function getCoords(location) {
+  if (!location) return null;
+  const loc = location.toLowerCase().trim();
+  if (SA_CITIES[loc]) return SA_CITIES[loc];
+  for (const [city, coords] of Object.entries(SA_CITIES)) {
+    if (loc.includes(city) || city.includes(loc)) return coords;
+  }
+  return null;
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371, toR = x => x * Math.PI / 180;
+  const dLat = toR(lat2-lat1), dLon = toR(lon2-lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toR(lat1))*Math.cos(toR(lat2))*Math.sin(dLon/2)**2;
+  return Math.round(R * 2 * Math.asin(Math.sqrt(a)));
+}
+
+function getDistKm(locationStr) {
+  if (!userLocation) return null;
+  const coords = getCoords(locationStr);
+  if (!coords) return null;
+  return haversineKm(userLocation.lat, userLocation.lng, coords[0], coords[1]);
+}
+
+function saveUserLocation(lat, lng, label) {
+  userLocation = { lat, lng, label };
+  localStorage.setItem('dealradar_userloc', JSON.stringify(userLocation));
+  updateLocBtn();
+  renderTable();
+}
+
+function clearUserLocation() {
+  userLocation = null;
+  localStorage.removeItem('dealradar_userloc');
+  updateLocBtn();
+  renderTable();
+}
+
+function updateLocBtn() {
+  const btn = document.getElementById('loc-btn');
+  if (!btn) return;
+  btn.textContent = userLocation ? `📍 ${userLocation.label}` : '📍 Set my location';
+  btn.style.borderColor = userLocation ? 'var(--gold)' : 'var(--border)';
+  btn.style.color = userLocation ? 'var(--gold)' : 'var(--muted)';
+}
+
+function openLocModal() {
+  let overlay = document.getElementById('loc-modal');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'loc-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(8,11,16,0.85);display:flex;align-items:center;justify-content:center;z-index:300';
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--surface);border:1px solid var(--border);padding:28px;min-width:340px;max-width:420px;width:90%';
+    box.innerHTML = `
+      <div style="font-size:10px;letter-spacing:2px;color:var(--muted);font-weight:600;margin-bottom:16px">SET MY LOCATION</div>
+      <button id="loc-gps-btn" style="width:100%;background:rgba(212,168,67,0.1);border:1px solid var(--gold);color:var(--gold);padding:10px;font-family:'IBM Plex Mono',monospace;font-size:12px;cursor:pointer;margin-bottom:16px">
+        USE GPS (auto-detect)
+      </button>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;text-align:center">— or type a city —</div>
+      <input id="loc-city-input" list="loc-city-list" placeholder="e.g. Sandton, Cape Town, Durban…"
+        style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:9px 12px;font-family:inherit;font-size:13px;outline:none;margin-bottom:4px" />
+      <datalist id="loc-city-list">${Object.keys(SA_CITIES).map(c=>c.replace(/\b./,m=>m.toUpperCase())).map(c=>`<option value="${c}">`).join('')}</datalist>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button id="loc-city-confirm" style="flex:1;background:var(--gold);color:#080b10;border:none;padding:9px;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700;cursor:pointer">CONFIRM CITY</button>
+        <button onclick="clearUserLocation();document.getElementById('loc-modal').remove()" style="background:none;border:1px solid var(--border);color:var(--muted);padding:9px 14px;font-family:inherit;font-size:12px;cursor:pointer">Clear</button>
+        <button onclick="document.getElementById('loc-modal').remove()" style="background:none;border:1px solid var(--border);color:var(--muted);padding:9px 14px;font-family:inherit;font-size:12px;cursor:pointer">✕</button>
+      </div>
+      <div id="loc-status" style="font-size:11px;color:var(--muted);margin-top:10px;min-height:16px"></div>
+    `;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    document.getElementById('loc-gps-btn').onclick = () => {
+      const status = document.getElementById('loc-status');
+      status.textContent = 'Detecting…';
+      navigator.geolocation.getCurrentPosition(pos => {
+        const { latitude: lat, longitude: lng } = pos.coords;
+        // Reverse-lookup label from nearest SA city
+        let nearest = null, nearestDist = Infinity;
+        for (const [city, coords] of Object.entries(SA_CITIES)) {
+          const d = haversineKm(lat, lng, coords[0], coords[1]);
+          if (d < nearestDist) { nearestDist = d; nearest = city; }
+        }
+        const label = nearest ? nearest.replace(/\b./,m=>m.toUpperCase()) + ' (GPS)' : 'GPS';
+        saveUserLocation(lat, lng, label);
+        status.style.color = 'var(--green)';
+        status.textContent = `Set to ${label} (${nearestDist} km from ${nearest})`;
+        setTimeout(() => overlay.remove(), 1200);
+      }, err => {
+        status.style.color = 'var(--red)';
+        status.textContent = 'GPS failed: ' + (err.message || 'permission denied');
+      });
+    };
+
+    document.getElementById('loc-city-confirm').onclick = () => {
+      const val = document.getElementById('loc-city-input').value.trim();
+      const coords = getCoords(val);
+      const status = document.getElementById('loc-status');
+      if (!coords) {
+        status.style.color = 'var(--red)';
+        status.textContent = 'City not found. Try a major SA city name.';
+        return;
+      }
+      const label = val.replace(/\b./,m=>m.toUpperCase());
+      saveUserLocation(coords[0], coords[1], label);
+      status.style.color = 'var(--green)';
+      status.textContent = `Set to ${label}`;
+      setTimeout(() => overlay.remove(), 900);
+    };
+
+    document.getElementById('loc-city-input').onkeydown = e => {
+      if (e.key === 'Enter') document.getElementById('loc-city-confirm').click();
+    };
+  } else {
+    overlay.remove();
+  }
+}
+
+function applyChartFilter({ year, location, priceMin, priceMax } = {}) {
+  if (year !== undefined) {
+    filterYear = year;
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      if (['all','2022','2023','2024'].includes(b.textContent)) b.classList.remove('active');
+      if (b.textContent === year) b.classList.add('active');
+    });
+  }
+  if (location !== undefined) {
+    filterLocation = location;
+    document.getElementById('filter-location').value = location;
+  }
+  if (priceMin !== undefined) { filterPriceMin = priceMin; filterPriceMax = priceMax; }
+
+  // Show active filter badge
+  const parts = [];
+  if (filterYear !== 'all') parts.push('Year: ' + filterYear);
+  if (filterLocation !== 'all') parts.push('Location: ' + filterLocation);
+  if (filterPriceMin) parts.push(`Price: R${(filterPriceMin/1000).toFixed(0)}k–R${(filterPriceMax/1000).toFixed(0)}k`);
+  const badge = document.getElementById('chart-filter-badge');
+  if (badge) {
+    badge.textContent = parts.length ? '⚡ Filtered by chart: ' + parts.join(' · ') + ' — click to clear' : '';
+    badge.style.display = parts.length ? 'block' : 'none';
+  }
+
+  // Switch to listings tab
+  const listingsBtn = [...document.querySelectorAll('.tab-btn')].find(b => b.textContent.trim() === 'Listings');
+  if (listingsBtn) setTab('listings', listingsBtn);
+  renderTable();
+}
+
+function clearChartFilter() {
+  filterYear = 'all'; filterLocation = 'all'; filterPriceMin = 0; filterPriceMax = 0;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    if (b.textContent === 'All') b.classList.add('active');
+    else if (['2022','2023','2024'].includes(b.textContent)) b.classList.remove('active');
+  });
+  document.getElementById('filter-location').value = 'all';
+  const badge = document.getElementById('chart-filter-badge');
+  if (badge) badge.style.display = 'none';
+  renderTable();
+}
 
 function setLocation(val) {
   filterLocation = val;
@@ -1110,16 +1447,55 @@ async function loadSettings() {
   const d = await res.json();
   if (d.price_alert) document.getElementById('alert-price').value = d.price_alert;
   if (d.wbc_url) document.getElementById('wbc-url').value = d.wbc_url;
+  if (d.max_price) document.getElementById('max-price').value = d.max_price;
+  if (d.telegram_token) document.getElementById('tele-token').value = d.telegram_token;
+  if (d.telegram_chat_id) document.getElementById('tele-chat').value = d.telegram_chat_id;
+  if (d.admin_password) document.getElementById('admin-pass').value = d.admin_password;
 }
 async function saveSettings() {
   const price_alert = document.getElementById('alert-price').value;
   const wbc_url = document.getElementById('wbc-url').value.trim();
+  const max_price = document.getElementById('max-price').value;
+  const telegram_token = document.getElementById('tele-token').value.trim();
+  const telegram_chat_id = document.getElementById('tele-chat').value.trim();
+  const admin_password = document.getElementById('admin-pass').value.trim();
+  
   await fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({price_alert, wbc_url})
+    body: JSON.stringify({price_alert, wbc_url, max_price, telegram_token, telegram_chat_id, admin_password})
   });
   alert('Settings saved!');
+}
+async function testTelegram() {
+  const btn = document.getElementById('test-tele-btn');
+  const oldText = btn.textContent;
+  const telegram_token = document.getElementById('tele-token').value.trim();
+  const telegram_chat_id = document.getElementById('tele-chat').value.trim();
+
+  if (!telegram_token || !telegram_chat_id) {
+    alert('Please enter both Token and Chat ID to test.');
+    return;
+  }
+
+  btn.textContent = 'Sending...';
+  btn.disabled = true;
+  
+  try {
+    const res = await fetch('/api/test-telegram', { 
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({telegram_token, telegram_chat_id})
+    });
+    const d = await res.json();
+    if (d.ok) alert('Test message sent! Check your Telegram.');
+    else alert('Error: ' + d.error);
+  } catch (e) {
+    alert('Failed to send test. Check console for details.');
+  } finally {
+    btn.textContent = oldText;
+    btn.disabled = false;
+  }
 }
 loadSettings();
 
@@ -1134,9 +1510,11 @@ function setTab(name, btn) {
   btn.classList.add('active');
   document.getElementById('tab-listings').style.display = name === 'listings' ? 'block' : 'none';
   document.getElementById('tab-charts').style.display = name === 'charts' ? 'block' : 'none';
+  document.getElementById('tab-price-changes').style.display = name === 'price-changes' ? 'block' : 'none';
   document.getElementById('tab-runs').style.display = name === 'runs' ? 'block' : 'none';
   document.getElementById('tab-dealers').style.display = name === 'dealers' ? 'block' : 'none';
   if (name === 'charts') setTimeout(renderCharts, 0);
+  if (name === 'price-changes') loadPriceChanges();
   if (name === 'runs') loadRuns();
   if (name === 'dealers') renderDealers();
 }
@@ -1239,7 +1617,6 @@ async function loadListings() {
   // Pass include_inactive if Status is Any or Gone, or just always and handle locally. Let's always fetch all.
   const res = await fetch('/api/listings?include_inactive=1');
   allListings = await res.json();
-  detectDuplicates();
 
   const locs = [...new Set(allListings.map(l => l.location).filter(Boolean))].sort();
   const locSelect = document.getElementById('filter-location');
@@ -1347,46 +1724,6 @@ function getDealScore(l, avgPrice) {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-// ─── DUPLICATE DETECTOR ────────────────────────────────────────────────────
-function detectDuplicates() {
-  allListings.forEach(l => { delete l._dupGroupId; });
-
-  let nextGroupId = 1;
-  const urlToGroup = new Map();
-
-  for (let i = 0; i < allListings.length; i++) {
-    for (let j = i + 1; j < allListings.length; j++) {
-      const a = allListings[i], b = allListings[j];
-      if (!a.price || !b.price || !a.year || !b.year) continue;
-      if (a.source === b.source) continue;
-      if (a.year !== b.year) continue;
-      const priceDiff = Math.abs(a.price - b.price) / Math.max(a.price, b.price);
-      if (priceDiff > 0.05) continue; // within 5%
-
-      // Optional: mileage within 15% adds confidence but don't require it
-      const aGroup = urlToGroup.get(a.url);
-      const bGroup = urlToGroup.get(b.url);
-      const gid = aGroup || bGroup || nextGroupId++;
-      urlToGroup.set(a.url, gid);
-      urlToGroup.set(b.url, gid);
-    }
-  }
-
-  allListings.forEach(l => {
-    if (urlToGroup.has(l.url)) l._dupGroupId = urlToGroup.get(l.url);
-  });
-
-  const dupCount = new Set(urlToGroup.values()).size;
-  const insightEl = document.getElementById('dup-insight');
-  const insightText = document.getElementById('dup-insight-text');
-  if (dupCount > 0) {
-    const listingCount = urlToGroup.size;
-    insightEl.style.display = 'inline-block';
-    insightText.textContent = `${listingCount} listings are duplicates across sources (${dupCount} matches) — click to filter`;
-  } else {
-    insightEl.style.display = 'none';
-  }
-}
 
 function renderTable() {
   let activeData = allListings.filter(l => l.is_active === 1);
@@ -1397,15 +1734,15 @@ function renderTable() {
   if (filterStatus === 'active') data = data.filter(l => l.is_active === 1);
   if (filterStatus === 'gone') data = data.filter(l => l.is_active === 0);
   if (filterStatus === 'watchlisted') data = data.filter(l => l.watchlisted);
-  if (filterStatus === 'duplicates') data = data.filter(l => l._dupGroupId);
-  
   if (filterYear !== 'all') data = data.filter(l => l.year === filterYear);
   if (filterLocation !== 'all') data = data.filter(l => l.location === filterLocation);
+  if (filterPriceMin) data = data.filter(l => l.price >= filterPriceMin && l.price <= filterPriceMax);
 
   // Compute deal score before sorting
   data.forEach(l => {
     l._dealScore = getDealScore(l, avg);
     l._priceDrop = (l.prev_price && l.price < l.prev_price) ? (l.prev_price - l.price) : 0;
+    l._distKm = getDistKm(l.location);
   });
 
   data.sort((a, b) => {
@@ -1419,6 +1756,7 @@ function renderTable() {
     else if (sortKey === 'model') { valA = a.variant||''; valB = b.variant||''; }
     else if (sortKey === 'title') { valA = a.title||''; valB = b.title||''; }
     else if (sortKey === 'location') { valA = a.location||''; valB = b.location||''; }
+    else if (sortKey === 'distance') { valA = a._distKm ?? 9e9; valB = b._distKm ?? 9e9; }
     else if (sortKey === 'status') { valA = a.is_active||0; valB = b.is_active||0; }
     else { valA = a.price; valB = b.price; }
     
@@ -1436,9 +1774,13 @@ function renderTable() {
   const icon = document.getElementById('sort-icon-' + sortKey);
   if (icon) icon.innerHTML = sortAsc ? '↑' : '↓';
 
+  // Show/hide distance column
+  const thDist = document.getElementById('th-distance');
+  if (thDist) thDist.style.display = userLocation ? '' : 'none';
+
   const tbody = document.getElementById('listings-tbody');
   if (!data.length) {
-    tbody.innerHTML = `<tr><td colspan="15"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="16"><div class="empty-state">
       <div class="icon">🔍</div>
       <div class="msg">No listings</div>
       <div class="sub">Run a scrape or adjust filters</div>
@@ -1563,13 +1905,6 @@ function renderTable() {
     spanSrc.style.cssText = 'background:var(--tertiary); color:var(--text); padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap';
     spanSrc.textContent = l.source || 'AutoTrader';
     tdSrc.appendChild(spanSrc);
-    if (l._dupGroupId) {
-      const dupBadge = document.createElement('div');
-      dupBadge.title = `Likely same car on multiple platforms (group ${l._dupGroupId})`;
-      dupBadge.style.cssText = 'font-size:10px;color:var(--gold);margin-top:3px;font-family:monospace;cursor:default';
-      dupBadge.textContent = '⚡ dup #' + l._dupGroupId;
-      tdSrc.appendChild(dupBadge);
-    }
     tr.appendChild(tdSrc);
 
     // 4. Price
@@ -1584,8 +1919,9 @@ function renderTable() {
     const tdDrop = document.createElement('td');
     if (hasDelta) {
       const divDelta = document.createElement('div');
+      const deltaPct = l.prev_price ? ((deltaVal / l.prev_price) * 100).toFixed(1) : null;
       divDelta.className = `price-delta ${isDown ? 'down' : 'up'}`;
-      divDelta.textContent = `${isDown ? '▼' : '▲'} ${fmt(deltaVal)}`;
+      divDelta.textContent = `${isDown ? '▼' : '▲'} ${fmt(deltaVal)}${deltaPct ? ' (' + deltaPct + '%)' : ''}`;
       tdDrop.appendChild(divDelta);
     } else {
       tdDrop.textContent = '—';
@@ -1641,6 +1977,17 @@ function renderTable() {
     tdLoc.appendChild(divLoc);
     tdLoc.appendChild(divDealer);
     tr.appendChild(tdLoc);
+
+    // 9b. Distance (only shown when user location is set)
+    const tdDist = document.createElement('td');
+    tdDist.style.cssText = 'font-family:monospace;font-size:12px;display:' + (userLocation ? '' : 'none');
+    if (userLocation && l._distKm !== null) {
+      tdDist.textContent = l._distKm + ' km';
+      tdDist.style.color = l._distKm < 20 ? 'var(--green)' : l._distKm < 60 ? 'var(--gold)' : 'var(--text)';
+    } else {
+      tdDist.textContent = userLocation ? '—' : '';
+    }
+    tr.appendChild(tdDist);
 
     // 10. Status
     const tdStatus = document.createElement('td');
@@ -1851,21 +2198,35 @@ async function renderCharts() {
   charts.dist = new Chart(document.getElementById('chart-dist'), {
     type: 'bar',
     data: { labels, datasets: [{ data: counts, backgroundColor: 'rgba(212,168,67,0.5)', borderColor: '#d4a843', borderWidth: 1 }] },
-    options: { ...chartDefaults }
+    options: {
+      ...chartDefaults,
+      onClick: (evt, els) => {
+        if (!els.length) return;
+        const i = els[0].index;
+        applyChartFilter({ priceMin: Math.round(min + i * bucketSize), priceMax: Math.round(min + (i + 1) * bucketSize) });
+      },
+      onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+    }
   });
 
   // Year breakdown
   const yearCounts = {};
   listings.forEach(l => { if (l.year) yearCounts[l.year] = (yearCounts[l.year]||0) + 1; });
   if (charts.year) charts.year.destroy();
+  const yearKeys = Object.keys(yearCounts);
   charts.year = new Chart(document.getElementById('chart-year'), {
     type: 'doughnut',
     data: {
-      labels: Object.keys(yearCounts),
+      labels: yearKeys,
       datasets: [{ data: Object.values(yearCounts), backgroundColor: ['#d4a843','#3fb950','#58a6ff'], borderColor: '#0d1117', borderWidth: 2 }]
     },
     options: {
-      plugins: { legend: { display: true, labels: { color: '#7d8590', font: { family: 'IBM Plex Mono', size: 11 } } } }
+      plugins: { legend: { display: true, labels: { color: '#7d8590', font: { family: 'IBM Plex Mono', size: 11 } } } },
+      onClick: (evt, els) => {
+        if (!els.length) return;
+        applyChartFilter({ year: yearKeys[els[0].index] });
+      },
+      onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
     }
   });
 
@@ -1925,9 +2286,116 @@ async function renderCharts() {
         scales: {
           x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
           y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 11 } } },
-        }
+        },
+        onClick: (evt, els) => {
+          if (!els.length) return;
+          applyChartFilter({ location: locStats[els[0].index].name });
+        },
+        onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
       }
     });
+  }
+
+  // ── Price Change Charts ──────────────────────────────────────────────────
+  const pcData = await fetch('/api/price-changes').then(r => r.json());
+
+  if (pcData.length) {
+    // Activity chart: drops/rises per day
+    const dayMap = {};
+    pcData.forEach(c => {
+      const d = c.scraped_at.slice(0, 10);
+      if (!dayMap[d]) dayMap[d] = { drops: 0, rises: 0 };
+      if (c.new_price < c.old_price) dayMap[d].drops++;
+      else dayMap[d].rises++;
+    });
+    const days = Object.keys(dayMap).sort();
+    const totalDrops = pcData.filter(c => c.new_price < c.old_price).length;
+    const totalRises = pcData.filter(c => c.new_price > c.old_price).length;
+    document.getElementById('pc-activity-badge').textContent =
+      `${totalDrops} drops · ${totalRises} rises · ${pcData.length} total`;
+
+    if (charts.pcActivity) charts.pcActivity.destroy();
+    charts.pcActivity = new Chart(document.getElementById('chart-pc-activity'), {
+      type: 'bar',
+      data: {
+        labels: days,
+        datasets: [
+          { label: 'Drops', data: days.map(d => dayMap[d].drops), backgroundColor: 'rgba(74,222,128,0.7)', borderColor: '#4ade80', borderWidth: 1 },
+          { label: 'Rises', data: days.map(d => dayMap[d].rises), backgroundColor: 'rgba(248,113,113,0.7)', borderColor: '#f87171', borderWidth: 1 },
+        ]
+      },
+      options: {
+        ...chartDefaults,
+        scales: {
+          x: { ...chartDefaults.scales.x, stacked: true },
+          y: { ...chartDefaults.scales.y, stacked: true, ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 } },
+        },
+        onClick: (evt, els) => {
+          if (!els.length) return;
+          const day = days[els[0].index];
+          // Filter price changes list to this day
+          const pcEl = document.getElementById('pc-list');
+          const allRows = pcEl.querySelectorAll('[data-date]');
+          allRows.forEach(r => { r.style.display = r.dataset.date === day ? '' : 'none'; });
+          const badge = document.getElementById('pc-summary');
+          if (badge) badge.innerHTML = `Showing ${day} <span style="color:var(--gold);cursor:pointer" onclick="loadPriceChanges()"> · clear ✕</span>`;
+        },
+        onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+      }
+    });
+
+    // Top drops chart: biggest absolute drops ever
+    const drops = pcData
+      .filter(c => c.new_price < c.old_price)
+      .map(c => ({ ...c, delta: c.old_price - c.new_price }))
+      .sort((a, b) => b.delta - a.delta)
+      .slice(0, 15);
+
+    if (drops.length) {
+      const labels = drops.map(c => {
+        const name = [c.year, c.variant || c.title].filter(Boolean).join(' ');
+        return name.length > 35 ? name.slice(0, 33) + '…' : name;
+      });
+      if (charts.pcTop) charts.pcTop.destroy();
+      charts.pcTop = new Chart(document.getElementById('chart-pc-top'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data: drops.map(c => c.delta),
+            backgroundColor: 'rgba(74,222,128,0.7)',
+            borderColor: '#4ade80',
+            borderWidth: 1,
+          }]
+        },
+        options: {
+          ...chartDefaults,
+          indexAxis: 'y',
+          plugins: {
+            ...chartDefaults.plugins,
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const c = drops[ctx.dataIndex];
+                  const pct = ((c.delta / c.old_price) * 100).toFixed(1);
+                  return ` -R${c.delta.toLocaleString()} (${pct}%)  ·  R${c.old_price.toLocaleString()} → R${c.new_price.toLocaleString()}`;
+                }
+              }
+            }
+          },
+          scales: {
+            x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
+            y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 10 } } },
+          },
+          onClick: (evt, els) => {
+            if (!els.length) return;
+            const c = drops[els[0].index];
+            showHistory(c.listing_id, [c.year, c.title, c.variant].filter(Boolean).join(' '));
+          },
+          onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+        }
+      });
+    }
   }
 }
 
@@ -2241,6 +2709,10 @@ function openCompare() {
   addRow('MILEAGE',       cars.map(c => ({ _num: c.mileage, text: c.mileage ? Number(c.mileage).toLocaleString() + ' km' : '—' })), 'low');
   addRow('VARIANT',       cars.map(c => c.variant || '—'), null);
   addRow('LOCATION',      cars.map(c => c.location || '—'), null);
+  if (userLocation) addRow('DISTANCE', cars.map(c => {
+    const d = getDistKm(c.location);
+    return d !== null ? { _num: d, text: d + ' km' } : '—';
+  }), 'low');
   addRow('DEALER',        cars.map(c => c.dealer || '—'), null);
   addRow('DEAL SCORE',    cars.map(c => ({ _num: c._cmpScore, text: c._cmpScore ? String(c._cmpScore) : '—' })), 'high');
   addRow('PRICE DROP',    cars.map(c => {
@@ -2400,6 +2872,92 @@ async function loadRuns() {
   }).join('');
 }
 
+// ─── PRICE CHANGES ─────────────────────────────────────────────────────────
+async function loadPriceChanges() {
+  const el = document.getElementById('pc-list');
+  const sumEl = document.getElementById('pc-summary');
+  el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:20px 0">Loading…</div>';
+
+  const changes = await fetch('/api/price-changes').then(r => r.json());
+
+  if (!changes.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:20px 0">No price changes recorded yet.</div>';
+    sumEl.textContent = '';
+    return;
+  }
+
+  const drops = changes.filter(c => c.new_price < c.old_price).length;
+  const rises = changes.filter(c => c.new_price > c.old_price).length;
+  sumEl.textContent = `${changes.length} total changes · ${drops} drops · ${rises} rises`;
+
+  // Group by date for visual separation
+  let lastDate = null;
+  const rows = [];
+
+  changes.forEach(c => {
+    const date = c.scraped_at.slice(0, 10);
+    if (date !== lastDate) {
+      lastDate = date;
+      const d = document.createElement('div');
+      d.style.cssText = 'font-size:10px;letter-spacing:2px;color:var(--muted);font-weight:600;padding:14px 0 6px 0;border-bottom:1px solid var(--border)';
+      d.textContent = new Date(date).toLocaleDateString('en-ZA', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+      rows.push(d);
+    }
+
+    const delta = c.new_price - c.old_price;
+    const pct = ((delta / c.old_price) * 100).toFixed(1);
+    const isDrop = delta < 0;
+    const colour = isDrop ? 'var(--green)' : 'var(--red)';
+    const arrow = isDrop ? '▼' : '▲';
+    const sign = isDrop ? '' : '+';
+
+    const row = document.createElement('div');
+    row.dataset.date = date;
+    row.style.cssText = 'display:flex;align-items:center;gap:16px;padding:10px 0;border-bottom:1px solid var(--border)';
+
+    const time = document.createElement('div');
+    time.style.cssText = 'font-family:monospace;font-size:11px;color:var(--muted);white-space:nowrap;width:48px;flex-shrink:0';
+    time.textContent = c.scraped_at.slice(11, 16);
+
+    const info = document.createElement('div');
+    info.style.cssText = 'flex:1;min-width:0';
+    const titleEl = document.createElement('a');
+    titleEl.href = c.url;
+    titleEl.target = '_blank';
+    titleEl.style.cssText = 'color:var(--text);text-decoration:none;font-weight:600;font-size:13px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    titleEl.textContent = [c.year, c.title, c.variant].filter(Boolean).join(' ');
+    const meta = document.createElement('div');
+    meta.style.cssText = 'font-size:11px;color:var(--muted);margin-top:2px';
+    meta.textContent = c.source || '';
+    info.appendChild(titleEl);
+    info.appendChild(meta);
+
+    const prices = document.createElement('div');
+    prices.style.cssText = 'text-align:center;white-space:nowrap;flex-shrink:0;width:150px';
+    const oldP = document.createElement('div');
+    oldP.style.cssText = 'font-size:11px;color:var(--muted);text-decoration:line-through';
+    oldP.textContent = 'R' + Number(c.old_price).toLocaleString();
+    const newP = document.createElement('div');
+    newP.style.cssText = 'font-size:14px;font-weight:700;color:var(--text)';
+    newP.textContent = 'R' + Number(c.new_price).toLocaleString();
+    prices.appendChild(oldP);
+    prices.appendChild(newP);
+
+    const badge = document.createElement('div');
+    badge.style.cssText = `font-size:13px;font-weight:700;color:${colour};white-space:nowrap;flex-shrink:0;width:140px;text-align:center`;
+    badge.textContent = `${arrow} ${sign}R${Math.abs(delta).toLocaleString()} (${sign}${pct}%)`;
+
+    row.appendChild(time);
+    row.appendChild(info);
+    row.appendChild(prices);
+    row.appendChild(badge);
+    rows.push(row);
+  });
+
+  el.innerHTML = '';
+  rows.forEach(r => el.appendChild(r));
+}
+
 // ─── DEALERS ───────────────────────────────────────────────────────────────
 function renderDealers() {
   const activeData = allListings.filter(l => l.is_active === 1);
@@ -2544,13 +3102,60 @@ _renderProfileSelect();
 
 // ─── INIT ──────────────────────────────────────────────────────────────────
 loadListings();
+updateLocBtn();
 </script>
 </body>
 </html>
 """
 
 
+def telegram_worker():
+    """Background thread to handle Telegram commands."""
+    offset = None
+    print("Telegram Worker: Started polling...")
+    while True:
+        try:
+            token = get_setting("telegram_token")
+            chat_id_saved = get_setting("telegram_chat_id")
+            
+            if not token or not chat_id_saved:
+                time.sleep(10)
+                continue
+                
+            updates = get_telegram_updates(offset)
+            for upd in updates:
+                offset = upd.get("update_id", 0) + 1
+                msg = upd.get("message", {})
+                chat_id_incoming = msg.get("chat", {}).get("id")
+                text = msg.get("text", "").lower().strip()
+                
+                # Verify chat ID matches owner
+                if str(chat_id_incoming) != str(chat_id_saved):
+                    continue
+                    
+                if text == "/scrape":
+                    send_telegram_msg("Scrape started! 🚀")
+                    with _scrape_lock:
+                        if not _scrape_status["running"]:
+                            _scrape_status["running"] = True
+                            _scrape_status["log"] = ["Starting scrape via Telegram..."]
+                            threading.Thread(target=_do_scrape, daemon=True).start()
+                        else:
+                            send_telegram_msg("A scrape is already in progress.")
+                elif text == "/status":
+                    count = len(get_listings_with_latest_price())
+                    send_telegram_msg(f"<b>DealRadar Status</b>\nTracking {count} items.\nSend /scrape to trigger a manual scan.")
+
+        except Exception as e:
+            print(f"Telegram Worker Error: {e}")
+        time.sleep(5)
+
+
 if __name__ == "__main__":
     print("\n  DealRadar Price Tracker")
     print("  Open → http://localhost:5001\n")
-    app.run(debug=False, port=5001, host="0.0.0.0")
+    
+    # Start Telegram worker
+    threading.Thread(target=telegram_worker, daemon=True).start()
+    
+    app.run(debug=False, port=5001, host="127.0.0.1")

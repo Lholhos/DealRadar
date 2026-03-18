@@ -6,6 +6,7 @@ Stores listings and full price history per listing (keyed by URL).
 import sqlite3
 import json
 import subprocess
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -135,8 +136,6 @@ def upsert_listings(listings: list[dict]) -> dict:
                     continue
                 else:
                     stats["price_changes"] += 1
-                    if alert_threshold > 0 and price <= alert_threshold:
-                        _trigger_mac_notification("Price Drop Alert!", f"{item.get('title')} is now R{price:,}")
 
             # Record price
             conn.execute(
@@ -145,9 +144,27 @@ def upsert_listings(listings: list[dict]) -> dict:
                 (listing_id, price, item.get("mileage"), item.get("mileage_raw"), item.get("price_raw"), now),
             )
 
-            # If new and below threshold, alert
-            if row is None and alert_threshold > 0 and price <= alert_threshold:
-                _trigger_mac_notification("New Deal Alert!", f"{item.get('title')} listed for R{price:,}")
+            # --- Telegram & Mac Alerts ---
+            is_new = (row is None)
+            is_price_drop = (last and price < last["price"])
+            
+            if is_new or is_price_drop:
+                title = "New Deal Alert!" if is_new else "Price Drop Alert!"
+                msg = f"{item.get('title')} is now R{price:,}"
+                if is_new:
+                    msg = f"New: {item.get('title')} for R{price:,}"
+                
+                # Mac notification (if below threshold)
+                if alert_threshold > 0 and price <= alert_threshold:
+                    _trigger_mac_notification(title, msg)
+                
+                # Telegram notification (always for new/price drops if configured)
+                token = get_setting("telegram_token")
+                chat_id = get_setting("telegram_chat_id")
+                if token and chat_id:
+                    link = item.get("url", "")
+                    tele_msg = f"<b>{title}</b>\n{msg}\n{item.get('year', '')} | {item.get('location', '')}\n<a href='{link}'>View Listing</a>"
+                    send_telegram_msg(tele_msg)
 
         # Mark listings not seen in this run as inactive
         urls_seen = [i["url"] for i in listings if i.get("url")]
@@ -209,6 +226,32 @@ def get_price_history(listing_id: int) -> list[dict]:
             "SELECT price, mileage, scraped_at FROM price_history WHERE listing_id=? ORDER BY scraped_at ASC",
             (listing_id,),
         ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_price_changes() -> list[dict]:
+    """All price changes across all listings, newest first, from the very first scrape."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT * FROM (
+                SELECT
+                    l.id        AS listing_id,
+                    l.title,
+                    l.url,
+                    l.year,
+                    l.variant,
+                    l.source,
+                    ph.price    AS new_price,
+                    ph.scraped_at,
+                    LAG(ph.price) OVER (
+                        PARTITION BY ph.listing_id ORDER BY ph.scraped_at
+                    ) AS old_price
+                FROM price_history ph
+                JOIN listings l ON l.id = ph.listing_id
+            )
+            WHERE old_price IS NOT NULL AND new_price != old_price
+            ORDER BY scraped_at DESC
+        """).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -278,18 +321,126 @@ def get_recent_runs(n: int = 10) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+# Secrets are stored in .env for security, others in tracker.db
+ENV_SECRETS = {"telegram_token", "telegram_chat_id", "admin_password"}
+ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
+
+def _read_env():
+    """Simple parser for .env file."""
+    if not os.path.exists(ENV_FILE):
+        return {}
+    secrets = {}
+    try:
+        with open(ENV_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    secrets[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception as e:
+        print(f"Error reading .env: {e}")
+    return secrets
+
+def _write_env(key, value):
+    """Write or update a key in .env file."""
+    secrets = _read_env()
+    secrets[key] = str(value)
+    try:
+        with open(ENV_FILE, "w") as f:
+            for k, v in secrets.items():
+                f.write(f"{k}={v}\n")
+    except Exception as e:
+        print(f"Error writing to .env: {e}")
+
+
 def get_setting(key: str, default=None) -> str:
+    # Check .env first for secrets
+    if key in ENV_SECRETS:
+        env_val = _read_env().get(key)
+        if env_val is not None:
+            return env_val
+            
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row[0] if row else default
 
 
 def set_setting(key: str, value: str):
+    # Store secrets in .env
+    if key in ENV_SECRETS:
+        _write_env(key, value)
+        # Also remove from DB if it exists there to avoid leaking
+        with get_conn() as conn:
+            conn.execute("DELETE FROM settings WHERE key=?", (key,))
+        return
+
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
             (key, value, value),
         )
+
+
+def send_telegram_msg(message: str, token_override=None, chat_id_override=None):
+    """Send a message to Telegram using Bot API."""
+    import urllib.request
+    import urllib.parse
+    import json
+    
+    token = token_override or get_setting("telegram_token")
+    chat_id = chat_id_override or get_setting("telegram_chat_id")
+    if not token or not chat_id:
+        return None
+        
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    
+    try:
+        req = urllib.request.Request(url, data=data)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.read()
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        try:
+            error_data = json.loads(error_body)
+            print(f"Telegram API Error: {error_data.get('description')}")
+            return {"error": error_data.get("description")}
+        except:
+            print(f"Telegram HTTP Error {e.code}: {error_body}")
+            return {"error": f"HTTP {e.code}"}
+    except Exception as e:
+        print(f"Telegram Connection Error: {e}")
+        return {"error": str(e)}
+
+
+def get_telegram_updates(offset=None):
+    """Fetch recent messages from Telegram Bot API."""
+    import urllib.request
+    import json
+    
+    token = get_setting("telegram_token")
+    if not token:
+        return []
+        
+    url = f"https://api.telegram.org/bot{token}/getUpdates?timeout=30"
+    if offset:
+        url += f"&offset={offset}"
+        
+    try:
+        with urllib.request.urlopen(url, timeout=35) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            if data.get("ok"):
+                return data.get("result", [])
+    except Exception as e:
+        print(f"Telegram Polling Error: {e}")
+    return []
 
 
 def _trigger_mac_notification(title: str, msg: str):

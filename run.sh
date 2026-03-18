@@ -20,14 +20,20 @@ fi
 PYTHON="$(command -v python3)"
 echo "  ✓ Python: $("$PYTHON" --version)"
 
+# NOTE: venv and run dir are kept outside OneDrive.
+# OneDrive sync causes Python .pyc file reads to hang indefinitely.
+VENV_DIR="$HOME/tiggo-tracker-venv"
+RUN_DIR="$HOME/tiggo-tracker-run"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Create virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
+if [ ! -d "$VENV_DIR" ]; then
     echo "  Creating virtual environment..."
-    "$PYTHON" -m venv venv
+    "$PYTHON" -m venv "$VENV_DIR"
 fi
 
 # Activate virtual environment
-source venv/bin/activate
+source "$VENV_DIR/bin/activate"
 PYTHON="python"
 
 # Check pip
@@ -39,11 +45,19 @@ fi
 # Install dependencies
 echo ""
 echo "  Installing Python packages..."
-"$PYTHON" -m pip install -r requirements.txt --quiet
+"$PYTHON" -m pip install -r "$PROJECT_DIR/requirements.txt" --quiet
 
 echo ""
 echo "  Installing Playwright Chromium (first run only)..."
 "$PYTHON" -m playwright install chromium
+
+# Copy Python source files to local run dir (avoids OneDrive sync hanging)
+mkdir -p "$RUN_DIR"
+cp "$PROJECT_DIR/app.py" "$PROJECT_DIR/scraper.py" "$RUN_DIR/"
+
+# Write database.py with absolute DB path pointing back to project dir
+sed "s|DB_PATH = Path(__file__).parent / \"tracker.db\"|DB_PATH = Path(\"$PROJECT_DIR/tracker.db\")|" \
+    "$PROJECT_DIR/database.py" > "$RUN_DIR/database.py"
 
 echo ""
 echo "  ─────────────────────────────────────"
@@ -53,4 +67,4 @@ echo "  Press Ctrl+C to stop"
 echo "  ─────────────────────────────────────"
 echo ""
 
-"$PYTHON" app.py
+cd "$RUN_DIR" && "$PYTHON" app.py

@@ -26,8 +26,14 @@ def parse_mileage(text: str) -> int | None:
     return int(digits) if digits else None
 
 
-def _parse_wbc(page, log, url: str = None) -> list[dict]:
+def _parse_wbc(page, log, url: str = None, max_price: int = None) -> list[dict]:
     target_url = url or WBC_URL
+    if max_price:
+        # Append price filter to WBC URL if it's the default or doesn't have it
+        if "Price_Lte" not in target_url:
+            separator = "&" if "?" in target_url else "?"
+            target_url += f"{separator}Price_Lte=%22{max_price}%22"
+    
     log(f"Scraping WeBuyCars: {target_url[:80]}...")
     try:
         page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
@@ -63,6 +69,10 @@ def _parse_wbc(page, log, url: str = None) -> list[dict]:
                         addr = seller.get("address", {})
                         if isinstance(addr, dict):
                             location = addr.get("addressLocality", "")
+                    
+                    # Final safeguard check against max_price
+                    if max_price and price and price > max_price:
+                        continue
                             
                     mileage = None
                     mileage_obj = data.get("mileageFromOdometer")
@@ -112,7 +122,7 @@ def _parse_wbc(page, log, url: str = None) -> list[dict]:
         log(f"WBC Error: {e}")
         return []
 
-def scrape(max_pages: int = 5, headless: bool = True, status_callback=None, wbc_url: str = None) -> list[dict]:
+def scrape(max_pages: int = 5, headless: bool = True, status_callback=None, wbc_url: str = None, max_price: int = None) -> list[dict]:
     listings = []
 
     def log(msg):
@@ -146,8 +156,12 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None, wbc_
         )
 
         # 1) AutoTrader
+        base_at_url = AT_BASE_URL
+        if max_price:
+            base_at_url += f"&price=0-{max_price}"
+
         for page_num in range(1, max_pages + 1):
-            url = AT_BASE_URL if page_num == 1 else f"{AT_BASE_URL}&pagenumber={page_num}"
+            url = base_at_url if page_num == 1 else f"{base_at_url}&pagenumber={page_num}"
             log(f"Scraping AT page {page_num}: {url}")
 
             try:
@@ -305,6 +319,10 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None, wbc_
                 # Skip obviously wrong prices (< R100k or > R2M)
                 if parsed_price and (parsed_price < 100_000 or parsed_price > 2_000_000):
                     continue
+                
+                # Final safeguard check against max_price
+                if max_price and parsed_price and parsed_price > max_price:
+                    continue
 
                 raw_title = item.get("title", "").replace("\n", " ").strip()
                 raw_url = item.get("url", "")
@@ -362,7 +380,7 @@ def scrape(max_pages: int = 5, headless: bool = True, status_callback=None, wbc_
 
         # 2) WeBuyCars
         effective_wbc_url = wbc_url or WBC_URL
-        wbc_results = _parse_wbc(page, log, url=effective_wbc_url)
+        wbc_results = _parse_wbc(page, log, url=effective_wbc_url, max_price=max_price)
         for w in wbc_results:
             if not any(l["url"] == w["url"] for l in listings):
                 listings.append(w)

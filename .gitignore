@@ -19,7 +19,18 @@ dump_tile.py
 inspect_dom.py
 test_single.py
 
+# Environment / Secrets
+.env
+.env*
+
+# Logs
+*.log
+app_output.log
+app_startup.log
+
+# Database backups / Other DBs
+tracker*.db*
+listings.db
+
 # macOS
 .DS_Store
-wbc_dump*
-*.html
