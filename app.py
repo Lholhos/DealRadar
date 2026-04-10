@@ -1571,33 +1571,6 @@ HTML = """<!DOCTYPE html>
   <!-- Charts Tab -->
   <div id="tab-charts" style="display:none">
     
-    <!-- Sold Listings Intelligence -->
-    <div style="background:var(--surface); border:1px solid var(--border); padding:24px; margin-bottom:24px">
-      <div class="chart-title" style="margin-bottom:16px; display:flex; align-items:center; gap:10px">
-        <span style="font-size:16px">🏷️</span> Sold Price Estimator
-        <span style="font-size:10px; color:var(--muted); font-weight:normal; text-transform:none; margin-left:auto">Likely sold based on inactivity. Estimates include DOM & drop weighted factors.</span>
-      </div>
-      <div class="table-wrap">
-        <table class="finance-table" style="font-size:11px">
-          <thead>
-            <tr>
-              <th>Vehicle / Source</th>
-              <th>First Seen</th>
-              <th>Last Seen</th>
-              <th>Days</th>
-              <th>Last Listed</th>
-              <th>Drops</th>
-              <th style="color:var(--gold)">Est. Sold Price</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="sold-tbody">
-            <tr><td colspan="8" style="text-align:center; padding:30px; color:var(--dim)">Calculating market exit signals...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
     <div class="chart-grid">
       <!-- Seasonal Intelligence -->
       <div class="chart-card">
@@ -1642,8 +1615,38 @@ HTML = """<!DOCTYPE html>
         <canvas id="chart-year" height="200"></canvas>
       </div>
       <div class="chart-card" style="grid-column:1/-1">
-        <div class="chart-title">Market Heat Map · Avg Price by Location</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div class="chart-title" style="margin-bottom:0">Market Heat Map · Avg Price by Location</div>
+          <div id="heatmap-badge" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--gold)"></div>
+        </div>
         <canvas id="chart-heatmap" height="80"></canvas>
+      </div>
+    </div>
+
+    <!-- Sold Listings Intelligence -->
+    <div style="background:var(--surface); border:1px solid var(--border); padding:24px; margin-top:24px">
+      <div class="chart-title" style="margin-bottom:16px; display:flex; align-items:center; gap:10px">
+        <span style="font-size:16px">🏷️</span> Sold Price Estimator
+        <span style="font-size:10px; color:var(--muted); font-weight:normal; text-transform:none; margin-left:auto">Likely sold based on inactivity. Estimates include DOM & drop weighted factors.</span>
+      </div>
+      <div class="table-wrap">
+        <table class="finance-table" style="font-size:11px">
+          <thead>
+            <tr>
+              <th>Vehicle / Source</th>
+              <th>First Seen</th>
+              <th>Last Seen</th>
+              <th>Days</th>
+              <th>Last Listed</th>
+              <th>Drops</th>
+              <th style="color:var(--gold)">Est. Sold Price</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sold-tbody">
+            <tr><td colspan="8" style="text-align:center; padding:30px; color:var(--dim)">Calculating market exit signals...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -2859,7 +2862,7 @@ async function renderCharts() {
 
   // Update Velocity Badge
   const velBadge = document.getElementById('velocity-badge');
-  if (vel !== undefined && vel !== 0) {
+  if (vel !== undefined && vel !== 0 && velBadge) {
     velBadge.style.display = 'inline-block';
     if (vel < 0) {
       velBadge.style.color = 'var(--green)';
@@ -2874,7 +2877,7 @@ async function renderCharts() {
 
   // ── Forecast chart (historical + projected) ──────────────────────────────
   const forecastBadge = document.getElementById('forecast-badge');
-  if (slope !== null && slope !== undefined) {
+  if (slope !== null && slope !== undefined && forecastBadge) {
     forecastBadge.style.display = 'inline-block';
     if (slope < 0) {
       forecastBadge.style.color = 'var(--green)';
@@ -2941,44 +2944,6 @@ async function renderCharts() {
     }
   });
 
-  // ── Best time to buy — day of week ────────────────────────────────────────
-  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  if (dowData.length > 0) {
-    const minPrice = Math.min(...dowData.map(d => d.avg_price));
-    const bestDayBadge = document.getElementById('best-day-badge');
-    const bestRow = dowData.find(d => d.avg_price === minPrice);
-    if (bestRow) {
-      bestDayBadge.style.display = 'inline-block';
-      bestDayBadge.textContent = 'Best: ' + DAY_NAMES[bestRow.dow] + ' · R' + Math.round(minPrice).toLocaleString();
-    }
-    const dowColors = dowData.map(d =>
-      d.avg_price === minPrice ? 'rgba(63,185,80,0.75)' : 'rgba(212,168,67,0.45)'
-    );
-    const dowBorders = dowData.map(d =>
-      d.avg_price === minPrice ? '#3fb950' : '#d4a843'
-    );
-    if (charts.dow) charts.dow.destroy();
-    charts.dow = new Chart(document.getElementById('chart-dow'), {
-      type: 'bar',
-      data: {
-        labels: dowData.map(d => DAY_NAMES[d.dow]),
-        datasets: [{
-          data: dowData.map(d => d.avg_price),
-          backgroundColor: dowColors,
-          borderColor: dowBorders,
-          borderWidth: 1,
-        }]
-      },
-      options: {
-        ...chartDefaults,
-        plugins: { legend: { display: false } },
-        scales: {
-          ...chartDefaults.scales,
-          y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } }
-        }
-      }
-    });
-  }
 
   // (Legacy market chart removed — forecast chart replaces it)
   if (charts.market) { charts.market.destroy(); charts.market = null; }
@@ -3066,8 +3031,10 @@ async function renderCharts() {
   if (locStats.length > 0) {
     const cheapestAvg = locStats[0].avg;
     const hmBadge = document.getElementById('heatmap-badge');
-    hmBadge.style.display = 'inline-block';
-    hmBadge.textContent = 'Cheapest: ' + locStats[0].name + ' · R' + cheapestAvg.toLocaleString();
+    if (hmBadge) {
+      hmBadge.style.display = 'inline-block';
+      hmBadge.textContent = 'Cheapest: ' + locStats[0].name + ' · R' + cheapestAvg.toLocaleString();
+    }
 
     const hmColors = locStats.map(d =>
       d.avg === cheapestAvg ? 'rgba(63,185,80,0.75)' : 'rgba(212,168,67,0.45)'
@@ -3075,144 +3042,155 @@ async function renderCharts() {
     const hmBorders = locStats.map(d =>
       d.avg === cheapestAvg ? '#3fb950' : '#d4a843'
     );
-    if (charts.heatmap) charts.heatmap.destroy();
-    charts.heatmap = new Chart(document.getElementById('chart-heatmap'), {
-      type: 'bar',
-      data: {
-        labels: locStats.map(d => d.name),
-        datasets: [{
-          data: locStats.map(d => d.avg),
-          backgroundColor: hmColors,
-          borderColor: hmBorders,
-          borderWidth: 1,
-        }]
-      },
-      options: {
-        indexAxis: 'y',
-        ...chartDefaults,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: {
-              label: ctx => {
-                const d = locStats[ctx.dataIndex];
-                return ` Avg R${d.avg.toLocaleString()}  ·  Lowest R${d.min.toLocaleString()}  ·  ${d.count} listing${d.count !== 1 ? 's' : ''}`;
+    const hmCanvas = document.getElementById('chart-heatmap');
+    if (hmCanvas) {
+        if (charts.heatmap) charts.heatmap.destroy();
+        charts.heatmap = new Chart(hmCanvas, {
+          type: 'bar',
+          data: {
+            labels: locStats.map(d => d.name),
+            datasets: [{
+              data: locStats.map(d => d.avg),
+              backgroundColor: hmColors,
+              borderColor: hmBorders,
+              borderWidth: 1,
+            }]
+          },
+          options: {
+            indexAxis: 'y',
+            ...chartDefaults,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: ctx => {
+                    const d = locStats[ctx.dataIndex];
+                    return ` Avg R${d.avg.toLocaleString()}  ·  Lowest R${d.min.toLocaleString()}  ·  ${d.count} listing${d.count !== 1 ? 's' : ''}`;
+                  }
+                }
               }
-            }
+            },
+            scales: {
+              x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
+              y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 11 } } },
+            },
+            onClick: (evt, els) => {
+              if (!els.length) return;
+              applyChartFilter({ location: locStats[els[0].index].name });
+            },
+            onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
           }
-        },
-        scales: {
-          x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
-          y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 11 } } },
-        },
-        onClick: (evt, els) => {
-          if (!els.length) return;
-          applyChartFilter({ location: locStats[els[0].index].name });
-        },
-        onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-      }
-    });
+        });
+    }
   }
 
   // ── Price Change Charts ──────────────────────────────────────────────────
-  const pcData = await fetch('/api/price-changes').then(r => r.json());
-
-  if (pcData.length) {
-    // Activity chart: drops/rises per day
-    const dayMap = {};
-    pcData.forEach(c => {
-      const d = c.scraped_at.slice(0, 10);
-      if (!dayMap[d]) dayMap[d] = { drops: 0, rises: 0 };
-      if (c.new_price < c.old_price) dayMap[d].drops++;
-      else dayMap[d].rises++;
-    });
-    const days = Object.keys(dayMap).sort();
-    const totalDrops = pcData.filter(c => c.new_price < c.old_price).length;
-    const totalRises = pcData.filter(c => c.new_price > c.old_price).length;
-    document.getElementById('pc-activity-badge').textContent =
-      `${totalDrops} drops · ${totalRises} rises · ${pcData.length} total`;
-
-    if (charts.pcActivity) charts.pcActivity.destroy();
-    charts.pcActivity = new Chart(document.getElementById('chart-pc-activity'), {
-      type: 'bar',
-      data: {
-        labels: days,
-        datasets: [
-          { label: 'Drops', data: days.map(d => dayMap[d].drops), backgroundColor: 'rgba(74,222,128,0.7)', borderColor: '#4ade80', borderWidth: 1 },
-          { label: 'Rises', data: days.map(d => dayMap[d].rises), backgroundColor: 'rgba(248,113,113,0.7)', borderColor: '#f87171', borderWidth: 1 },
-        ]
-      },
-      options: {
-        ...chartDefaults,
-        scales: {
-          x: { ...chartDefaults.scales.x, stacked: true },
-          y: { ...chartDefaults.scales.y, stacked: true, ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 } },
-        },
-        onClick: (evt, els) => {
-          if (!els.length) return;
-          const day = days[els[0].index];
-          // Filter price changes list to this day
-          const pcEl = document.getElementById('pc-list');
-          const allRows = pcEl.querySelectorAll('[data-date]');
-          allRows.forEach(r => { r.style.display = r.dataset.date === day ? '' : 'none'; });
-          const badge = document.getElementById('pc-summary');
-          if (badge) badge.innerHTML = `Showing ${day} <span style="color:var(--gold);cursor:pointer" onclick="loadPriceChanges()"> · clear ✕</span>`;
-        },
-        onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-      }
-    });
-
-    // Top drops chart: biggest absolute drops ever
-    const drops = pcData
-      .filter(c => c.new_price < c.old_price)
-      .map(c => ({ ...c, delta: c.old_price - c.new_price }))
-      .sort((a, b) => b.delta - a.delta)
-      .slice(0, 15);
-
-    if (drops.length) {
-      const labels = drops.map(c => {
-        const name = [c.year, c.variant || c.title].filter(Boolean).join(' ');
-        return name.length > 35 ? name.slice(0, 33) + '…' : name;
+  const pcRes = await fetch('/api/price-changes');
+  if (pcRes.ok) {
+    const pcData = await pcRes.json();
+    if (pcData.length) {
+      // Activity chart: drops/rises per day
+      const dayMap = {};
+      pcData.forEach(c => {
+        const d = c.scraped_at.slice(0, 10);
+        if (!dayMap[d]) dayMap[d] = { drops: 0, rises: 0 };
+        if (c.new_price < c.old_price) dayMap[d].drops++;
+        else dayMap[d].rises++;
       });
-      if (charts.pcTop) charts.pcTop.destroy();
-      charts.pcTop = new Chart(document.getElementById('chart-pc-top'), {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [{
-            data: drops.map(c => c.delta),
-            backgroundColor: 'rgba(74,222,128,0.7)',
-            borderColor: '#4ade80',
-            borderWidth: 1,
-          }]
-        },
-        options: {
-          ...chartDefaults,
-          indexAxis: 'y',
-          plugins: {
-            ...chartDefaults.plugins,
-            tooltip: {
-              callbacks: {
-                label: ctx => {
-                  const c = drops[ctx.dataIndex];
-                  const pct = ((c.delta / c.old_price) * 100).toFixed(1);
-                  return ` -R${c.delta.toLocaleString()} (${pct}%)  ·  R${c.old_price.toLocaleString()} → R${c.new_price.toLocaleString()}`;
+      const days = Object.keys(dayMap).sort();
+      const totalDrops = pcData.filter(c => c.new_price < c.old_price).length;
+      const totalRises = pcData.filter(c => c.new_price > c.old_price).length;
+      
+      const pcaBadge = document.getElementById('pc-activity-badge');
+      if (pcaBadge) pcaBadge.textContent = `${totalDrops} drops · ${totalRises} rises · ${pcData.length} total`;
+
+      const pcaCanvas = document.getElementById('chart-pc-activity');
+      if (pcaCanvas) {
+        if (charts.pcActivity) charts.pcActivity.destroy();
+        charts.pcActivity = new Chart(pcaCanvas, {
+          type: 'bar',
+          data: {
+            labels: days,
+            datasets: [
+              { label: 'Drops', data: days.map(d => dayMap[d].drops), backgroundColor: 'rgba(74,222,128,0.7)', borderColor: '#4ade80', borderWidth: 1 },
+              { label: 'Rises', data: days.map(d => dayMap[d].rises), backgroundColor: 'rgba(248,113,113,0.7)', borderColor: '#f87171', borderWidth: 1 },
+            ]
+          },
+          options: {
+            ...chartDefaults,
+            scales: {
+              x: { ...chartDefaults.scales.x, stacked: true },
+              y: { ...chartDefaults.scales.y, stacked: true, ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 } },
+            },
+            onClick: (evt, els) => {
+              if (!els.length) return;
+              const day = days[els[0].index];
+              const pcEl = document.getElementById('pc-list');
+              if (pcEl) {
+                  const allRows = pcEl.querySelectorAll('[data-date]');
+                  allRows.forEach(r => { r.style.display = r.dataset.date === day ? '' : 'none'; });
+                  const badge = document.getElementById('pc-summary');
+                  if (badge) badge.innerHTML = `Showing ${day} <span style="color:var(--gold);cursor:pointer" onclick="loadPriceChanges()"> · clear ✕</span>`;
+              }
+            },
+            onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+          }
+        });
+      }
+
+      // Top drops
+      const drops = pcData
+        .filter(c => c.new_price < c.old_price)
+        .map(c => ({ ...c, delta: c.old_price - c.new_price }))
+        .sort((a, b) => b.delta - a.delta)
+        .slice(0, 15);
+
+      const pctCanvas = document.getElementById('chart-pc-top');
+      if (pctCanvas && drops.length) {
+        const labels = drops.map(c => {
+          const name = [c.year, c.variant || c.title].filter(Boolean).join(' ');
+          return name.length > 35 ? name.slice(0, 33) + '…' : name;
+        });
+        if (charts.pcTop) charts.pcTop.destroy();
+        charts.pcTop = new Chart(pctCanvas, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [{
+              data: drops.map(c => c.delta),
+              backgroundColor: 'rgba(74,222,128,0.7)',
+              borderColor: '#4ade80',
+              borderWidth: 1,
+            }]
+          },
+          options: {
+            ...chartDefaults,
+            indexAxis: 'y',
+            plugins: {
+              ...chartDefaults.plugins,
+              tooltip: {
+                callbacks: {
+                  label: ctx => {
+                    const c = drops[ctx.dataIndex];
+                    const pct = ((c.delta / c.old_price) * 100).toFixed(1);
+                    return ` -R${c.delta.toLocaleString()} (${pct}%)  ·  R${c.old_price.toLocaleString()} → R${c.new_price.toLocaleString()}`;
+                  }
                 }
               }
-            }
-          },
-          scales: {
-            x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
-            y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 10 } } },
-          },
-          onClick: (evt, els) => {
-            if (!els.length) return;
-            const c = drops[els[0].index];
-            showHistory(c.listing_id, [c.year, c.title, c.variant].filter(Boolean).join(' '));
-          },
-          onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-        }
-      });
+            },
+            scales: {
+              x: { ...chartDefaults.scales.x, ticks: { ...chartDefaults.scales.x.ticks, callback: v => 'R' + (v/1000).toFixed(0) + 'k' } },
+              y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, font: { family: 'IBM Plex Mono', size: 10 } } },
+            },
+            onClick: (evt, els) => {
+              if (!els.length) return;
+              const c = drops[els[0].index];
+              showHistory(c.listing_id, [c.year, c.title, c.variant].filter(Boolean).join(' '));
+            },
+            onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+          }
+        });
+      }
     }
   }
 }
