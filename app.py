@@ -113,12 +113,14 @@ _LOGIN_HTML = '''
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b10">
 <title>DealRadar · Login</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
     background: #080b10;
     color: #e6edf3;
@@ -126,18 +128,25 @@ _LOGIN_HTML = '''
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    padding: 16px;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
   .card {
     background: #0d1117;
     border: 1px solid #30363d;
     border-top: 3px solid #d4a843;
-    padding: 48px 40px;
+    padding: 32px 24px;
     width: 100%;
     max-width: 400px;
   }
-  .logo { font-size: 22px; font-weight: 700; color: #d4a843; letter-spacing: 3px; margin-bottom: 8px; }
-  .subtitle { font-size: 11px; color: #7d8590; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 36px; }
+  @media (min-width: 480px) {
+    .card { padding: 48px 40px; }
+  }
+  .logo { font-size: 20px; font-weight: 700; color: #d4a843; letter-spacing: 2px; margin-bottom: 8px; }
+  .subtitle { font-size: 11px; color: #7d8590; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 28px; }
   label { font-size: 11px; color: #7d8590; text-transform: uppercase; letter-spacing: 1px; display: block; margin-bottom: 8px; }
   input {
     width: 100%;
@@ -145,28 +154,34 @@ _LOGIN_HTML = '''
     border: 1px solid #30363d;
     color: #e6edf3;
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 14px;
+    font-size: 16px;
+    min-height: 48px;
     padding: 12px 16px;
     margin-bottom: 24px;
     outline: none;
     transition: border-color 0.2s;
   }
   input:focus { border-color: #d4a843; }
+  input:focus-visible { outline: 2px solid #d4a843; outline-offset: 2px; }
   button {
     width: 100%;
     background: #d4a843;
     color: #080b10;
     border: none;
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 700;
     letter-spacing: 2px;
     text-transform: uppercase;
-    padding: 14px;
+    padding: 16px;
+    min-height: 48px;
     cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
     transition: opacity 0.2s;
   }
-  button:hover { opacity: 0.85; }
+  button:hover, button:active { opacity: 0.85; }
+  button:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }
   .error {
     background: rgba(248,81,73,0.1);
     border: 1px solid #f85149;
@@ -893,8 +908,11 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b10">
 <title>DealRadar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
@@ -929,13 +947,23 @@ HTML = """<!DOCTYPE html>
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-text-size-adjust: 100%; }
 
   body {
     background: var(--bg);
     color: var(--text);
     font-family: 'IBM Plex Sans', sans-serif;
     font-size: 14px;
-    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+  button, .tab-btn, .filter-btn, .icon-btn, .scrape-btn, .action-btn, .history-btn, .cmp-btn, .star-btn, .print-btn, .modal-close, a.icon-btn {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible {
+    outline: 2px solid var(--gold);
+    outline-offset: 2px;
   }
 
   /* HEADER */
@@ -1037,7 +1065,7 @@ HTML = """<!DOCTYPE html>
     flex-shrink: 0;
     transition: background 0.2s;
   }
-  .scrape-btn:hover { background: var(--gold2); }
+  .scrape-btn:hover, .scrape-btn:active { background: var(--gold2); }
   .scrape-btn:disabled { background: var(--dim); color: var(--muted); cursor: not-allowed; }
   .scrape-log {
     font-family: 'IBM Plex Mono', monospace;
@@ -1076,7 +1104,8 @@ HTML = """<!DOCTYPE html>
     color: var(--gold);
     border-bottom-color: var(--gold);
   }
-  .tab-btn:hover:not(.active) { color: var(--text); }
+  .tab-btn:hover:not(.active),
+  .tab-btn:active:not(.active) { color: var(--text); }
 
   /* FILTERS */
   .filters {
@@ -1445,7 +1474,7 @@ HTML = """<!DOCTYPE html>
     transition: all 0.15s;
     line-height: 1;
   }
-  .icon-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .icon-btn:hover, .icon-btn:active { border-color: var(--gold); color: var(--gold); }
 
   /* SEARCH PROFILES */
   .profiles-row {
@@ -1554,7 +1583,7 @@ HTML = """<!DOCTYPE html>
     cursor: pointer;
     transition: all 0.2s;
   }
-  .action-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .action-btn:hover, .action-btn:active { border-color: var(--gold); color: var(--gold); }
 
   /* COUNTER OFFERS */
   .offer-row {
@@ -1595,6 +1624,212 @@ HTML = """<!DOCTYPE html>
     gap: 8px;
   }
   .print-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ────────────────────────────────────────────────────────────────────────── */
+  /* MOBILE BREAKPOINT (≤767px) — single-pass overrides for the desktop layout */
+  /* ────────────────────────────────────────────────────────────────────────── */
+  @media (max-width: 767px) {
+    /* Header — shrink padding, respect safe area, drop to 56px */
+    .header {
+      padding: 0 12px;
+      padding-left: max(12px, env(safe-area-inset-left));
+      padding-right: max(12px, env(safe-area-inset-right));
+      padding-top: env(safe-area-inset-top);
+      height: 56px;
+      gap: 8px;
+    }
+    .header-brand .subtitle { display: none; }
+    .header-brand .wordmark { font-size: 13px; letter-spacing: 0.5px; }
+
+    /* Stats bar — 2 cols, last item full-width */
+    .statsbar { grid-template-columns: repeat(2, 1fr); }
+    .stat {
+      padding: 10px 12px;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat:nth-child(2n) { border-right: none; }
+    .stat:last-child { border-bottom: none; }
+    .stat-value { font-size: 15px; }
+
+    /* Market insights row */
+    #market-insights { padding: 0 12px !important; }
+
+    /* Main padding */
+    .main { padding: 16px 12px; }
+
+    /* Scrape panel — stack everything; defeat inline fixed widths */
+    .scrape-panel {
+      flex-direction: column;
+      gap: 12px;
+      padding: 14px;
+    }
+    .scrape-panel > div,
+    .scrape-panel > div > div {
+      flex-wrap: wrap;
+      width: 100%;
+      gap: 8px !important;
+    }
+    .scrape-panel input,
+    .scrape-panel select {
+      width: 100% !important;
+      max-width: 100% !important;
+      font-size: 16px !important;
+      min-height: 44px !important;
+      padding: 10px 12px !important;
+    }
+    .scrape-panel .scrape-btn,
+    .scrape-panel button {
+      min-height: 44px;
+      padding: 10px 16px;
+      flex: 1 1 auto;
+    }
+
+    /* Tabs — momentum scroll horizontally + larger tap targets */
+    .tabs {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      flex-wrap: nowrap;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      padding: 14px 18px;
+      font-size: 11px;
+      min-height: 48px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* Filters row — wrap, larger tap targets */
+    .filters {
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .filter-btn {
+      padding: 10px 14px;
+      font-size: 11px;
+      min-height: 44px;
+      min-width: 44px;
+    }
+    .filters select,
+    .filters input {
+      font-size: 16px !important;
+      min-height: 44px !important;
+      padding: 8px 10px !important;
+      flex: 1 1 140px;
+      max-width: 100% !important;
+      width: auto !important;
+    }
+    .filter-label { width: 100%; }
+
+    /* Profiles row */
+    .profiles-row {
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .profiles-row select {
+      font-size: 16px !important;
+      min-height: 44px !important;
+      flex: 1 1 100%;
+    }
+    .profiles-row .filter-btn { flex: 1 1 auto; }
+
+    /* Chart grid — single column */
+    .chart-grid { grid-template-columns: 1fr; }
+    .chart-card { padding: 14px; }
+
+    /* Run row — stacked label/value pairs */
+    .run-row {
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 12px;
+      font-size: 12px;
+    }
+
+    /* Finance grid — single column */
+    .finance-grid { grid-template-columns: 1fr; gap: 16px; }
+    .finance-card { padding: 18px; }
+    .finance-input-group input,
+    .finance-input-group select {
+      font-size: 16px !important;
+      min-height: 44px !important;
+    }
+
+    /* All inputs — block iOS auto-zoom (defeats inline styles too) */
+    input[type="text"],
+    input[type="number"],
+    input[type="email"],
+    input[type="password"],
+    input[type="tel"],
+    input[type="search"],
+    input[type="date"],
+    select,
+    textarea {
+      font-size: 16px !important;
+      min-height: 44px !important;
+    }
+
+    /* Tables — keep horizontal scroll inside their wrap, never bust the body */
+    .table-wrap {
+      -webkit-overflow-scrolling: touch;
+      max-width: 100%;
+    }
+
+    /* History modal — fit within viewport, scroll vertically */
+    .modal {
+      width: 100% !important;
+      max-width: calc(100vw - 24px) !important;
+      max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+      padding: 20px;
+    }
+    .modal-close { min-width: 44px; min-height: 44px; }
+
+    /* Compare modal — same treatment */
+    .cmp-modal-overlay { padding: 12px; align-items: center; }
+    .cmp-modal {
+      padding: 16px;
+      max-width: 100%;
+      max-height: calc(100dvh - 24px);
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .cmp-table { font-size: 11px; }
+    .cmp-table th, .cmp-table td { padding: 8px 10px; }
+    .cmp-table .row-label { width: 100px; }
+
+    /* Pre-approval modal — same treatment, plus stack the 2-col grid */
+    #pre-approval-modal .modal { padding: 18px; }
+    #pre-approval-modal .modal > div[style*="grid-template-columns:1fr 1fr"] {
+      grid-template-columns: 1fr !important;
+    }
+
+    /* Compare bar — safe area, wrap chips, adjust position */
+    .compare-bar {
+      padding: 10px 12px;
+      padding-bottom: calc(10px + env(safe-area-inset-bottom));
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .cmp-thumb-wrap { width: 100%; flex-wrap: wrap; }
+    .cmp-chip { max-width: 100%; }
+    .cmp-slot { width: 100%; }
+    .compare-bar > button { flex: 1 1 auto; min-height: 44px; }
+
+    /* Push body content above the compare bar when visible (uses :has) */
+    body { padding-bottom: env(safe-area-inset-bottom); }
+    body:has(.compare-bar.visible) { padding-bottom: calc(140px + env(safe-area-inset-bottom)); }
+
+    /* Ownership cost grid in history modal — stack to 1 col */
+    #ownership-wrap > div[style*="grid-template-columns:1fr 1fr 1fr"] {
+      grid-template-columns: 1fr !important;
+    }
+    #ownership-wrap input,
+    #ownership-wrap select {
+      font-size: 16px !important;
+      min-height: 44px !important;
+    }
+  }
 </style>
 </head>
 <body>
@@ -1608,7 +1843,7 @@ HTML = """<!DOCTYPE html>
     <span id="velocity-badge" class="header-badge" style="display:none;font-weight:bold"></span>
     <button class="icon-btn" id="compact-btn" onclick="toggleCompact()" title="Toggle compact view">⊟</button>
     <button class="icon-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">☀</button>
-    <a href="/logout" style="background:#1c1f26;border:1px solid #30363d;color:#7d8590;font-family:inherit;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:6px 14px;text-decoration:none;transition:color 0.2s,border-color 0.2s" onmouseover="this.style.color='#d4a843';this.style.borderColor='#d4a843'" onmouseout="this.style.color='#7d8590';this.style.borderColor='#30363d'">Logout</a>
+    <a href="/logout" class="logout-link" style="background:#1c1f26;border:1px solid #30363d;color:#7d8590;font-family:inherit;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:10px 14px;text-decoration:none;min-height:44px;display:inline-flex;align-items:center;transition:color 0.2s,border-color 0.2s" onmouseover="this.style.color='#d4a843';this.style.borderColor='#d4a843'" onmouseout="this.style.color='#7d8590';this.style.borderColor='#30363d'">Logout</a>
   </div>
 </div>
 
@@ -4533,12 +4768,17 @@ def telegram_worker():
                 offset = upd.get("update_id", 0) + 1
                 msg = upd.get("message", {})
                 chat_id_incoming = msg.get("chat", {}).get("id")
-                text = msg.get("text", "").lower().strip()
-                
+                raw_text = msg.get("text", "").lower().strip()
+                # Strip @botname suffix (e.g. "/scrape@DealRadar_bot" → "/scrape")
+                text = raw_text.split("@")[0] if raw_text.startswith("/") else raw_text
+
+                print(f"Telegram Worker: msg from chat_id={chat_id_incoming}, text='{raw_text}', parsed='{text}'")
+
                 # Verify chat ID matches owner
                 if str(chat_id_incoming) != str(chat_id_saved):
+                    print(f"Telegram Worker: chat_id mismatch (got {chat_id_incoming}, expected {chat_id_saved})")
                     continue
-                    
+
                 if text == "/scrape":
                     send_telegram_msg("Scrape started! 🚀")
                     with _scrape_lock:
@@ -4551,6 +4791,8 @@ def telegram_worker():
                 elif text == "/status":
                     count = len(get_listings_with_latest_price())
                     send_telegram_msg(f"<b>DealRadar Status</b>\nTracking {count} items.\nSend /scrape to trigger a manual scan.")
+                else:
+                    print(f"Telegram Worker: unrecognized command '{text}'")
 
         except Exception as e:
             print(f"Telegram Worker Error: {e}")
